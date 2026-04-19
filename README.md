@@ -74,33 +74,53 @@ Citation(law, article, sub, paragraph, item, subitem)
 
 #### 同義詞 tier 展開邏輯
 
-法律用語多種寫法（「僱傭 / 雇用 / 雇傭」/「古蹟 / 古績」/ 簡稱 / 異體字），搜尋時要能自動展開、但不能把「不等價」的詞誤當同義（會把搜尋結果打爛）。用 4 tier 分離、**tier 由 corpus_hits 自動決定 + 律師 feedback 累積 auto promote/demote**（沒有需要律師手動挑選的 UI 流程）：
+法律用語多種寫法（「僱傭 / 雇用 / 雇傭」/「古蹟 / 古績」/ 簡稱 / 異體字），搜尋時要能自動展開、但不能把「不等價」的詞誤當同義（會把搜尋結果打爛）。用 4 tier 分離、**discovery 來的一律 candidate、必須律師手動確認才能升 confirmed 生效於搜尋**：
 
-| Tier | 行為 | Auto 判準（見 `db.tier_from_corpus_hits`）|
+| Tier | 搜尋時行為 | 來源 |
 |---|---|---|
-| **`confirmed`** | 自動展開、進搜尋變體池 | corpus_hits ≥ 50、或從 `law_abbreviations.json`（72 組法律簡稱）/ `synonym_seed.json`（事務所 seed）同步進來、或 accept 累積 ≥3 從低 tier 升上來 |
-| **`candidate`** | **不自動展開**，存字典保留（UI preview 時會顯示給律師參考）| corpus_hits 6–49、或 confirmed 被 reject 累積 ≥2 降下來 |
-| **`likely_typo`** | 疑似錯字、不展開 | corpus_hits 1–5（在司法院幾乎查不到、高機率是 LLM 幻覺出的錯字變體） |
-| **`rejected`** | 永不展開 | corpus_hits = 0（corpus 完全沒這個詞） |
+| **`confirmed`** | 自動展開、進搜尋變體池 | 律師 ✓ 累積 ≥3 次的 candidate、或啟動時 seed 檔進來（`law_abbreviations.json` 72 組法律簡稱、`synonym_seed.json` 事務所 seed） |
+| **`candidate`** | **不自動展開**、在設定面板「待確認」section 顯示給律師審核 | **Stage 3 精讀時 Claude 順便 discover 的變體**（主要來源） |
+| **`likely_typo`** | 不展開 | 初次 upsert 時 corpus_hits 1–5 分進這檔（corpus 幾乎查不到、高機率是 LLM 幻覺） |
+| **`rejected`** | 永不展開、不再推薦 | 律師 ✕ 累積 ≥2 次、或 corpus_hits=0 |
 
-**Tier 決定的兩條路徑**：
-1. **首次建立**：Claude 展開一批 variants → 每個 variant 打 MCP search 取 `corpus_hits` → 用 `tier_from_corpus_hits` 寫入
-2. **長期校準**：搜尋後律師按 ✓ / ✕ 回饋命中品質、累積 `accept_count` / `reject_count` → 達 `_AUTO_PROMOTE_ACCEPTS=3` 或 `_AUTO_DEMOTE_REJECTS=2` 門檻自動改 tier（see `db.record_synonym_feedback`）
+**主流程（discovery-driven、律師手動確認）**：
 
-搜尋展開流程（`synonym_expander.py`）：
+```
+Stage 3 精讀每筆判決時、Claude prompt 帶 do_discovery=True
+  ↓ 順便列出判決裡看到的 variant candidates（如「僱傭」→「雇傭」「僱庸」）
+  ↓
+_persist_discovered_variants 寫 synonym_dictionary
+  ↓ 強制 candidate tier（即使 corpus_hits ≥ 50 也不自動升 confirmed）
+  ↓ 為什麼：Claude 會把「雇主」「勞僱契約」這種**不同法律概念**誤判為同義
+  ↓        corpus 命中再高也不能 auto 生效、必須律師把關
+  ↓
+律師打開「設定 → 同義詞庫 → 待確認」section
+  ↓ ✓ accept：accept_count++，累計 ≥3 次 → auto 升 confirmed
+  ↓ ✕ reject：reject_count++、累計 ≥2 次 → 降 rejected、永不再推薦
+  ↓
+下次搜尋 → 展開 pipeline 只取 confirmed tier、candidate 不進搜尋變體
+```
+
+**Thresholds**（`src/db/database.py`）：
+```python
+_AUTO_PROMOTE_ACCEPTS = 3    # candidate/likely_typo ≥3 次 ✓ → confirmed
+_AUTO_DEMOTE_REJECTS  = 2    # confirmed ≥2 次 ✕ → candidate
+```
+
+**搜尋展開實際路徑（`synonym_expander.py`）**：
 
 ```
 律師輸入「僱傭」
   ↓
 查 synonym_dictionary（only_confirmed=True）
-  → 取 tier='confirmed' 的 variants：{「僱傭」, 「雇傭」, 「僱庸」}
+  → 取 tier='confirmed' 的 variants：{「僱傭」, 「雇傭」, 「僱庸」}（律師確認過的）
   ↓
 展開後 keyword list 丟 stage 1 窮盡搜尋（cartesian product + union）
 ```
 
-**Fallback**：字典沒任何 confirmed 記錄時、only_confirmed=True 模式會放棄 LLM 展開、直接用原 keyword 搜（保守）；UI preview 呼叫（only_confirmed=False）才會觸發 Claude 首次展開 + 寫回字典。
+**Seed 檔**：`law_abbreviations.json`（72 組法律簡稱、如「勞基法 ↔ 勞動基準法」）+ `synonym_seed.json`（事務所用語）啟動時同步進字典、直接進 confirmed tier、不用律師逐一確認。見 `runner.py` 的 `sync_law_abbreviations_to_synonyms` / `sync_synonym_seed_to_dict`。
 
-`synonym_dictionary` 表是**跨 task 共用**、律師 feedback 終身累積、律所多人共用時效益最大。
+**`synonym_dictionary` 表跨 task 共用**、律師 feedback 終身累積、律所多人共用時效益最大。律師在事務所持續用、candidate 清單會自然收斂成事務所特有的用語庫。
 
 流程全圖見下方「[Stage 流程](#stage-流程4-階段律師主動推進)」段。
 
@@ -193,16 +213,16 @@ Tab 切換純 client-side 過濾（零 API call）。閱讀器的 A/D/J/K 上下
 
 法律用語多種寫法（「僱傭 / 雇用 / 雇傭」/「古蹟 / 古績」），搜尋時需要自動展開同義組。
 
-Tier 設計（auto 分級、由 `corpus_hits` 決定、律師 feedback 累積 auto 升降）：
+Tier 設計（**discovery 一律 candidate、律師手動確認才升 confirmed**）：
 
-| Tier | 行為 | Auto 判準（`db.tier_from_corpus_hits`）|
+| Tier | 搜尋時行為 | 來源 |
 |---|---|---|
-| `confirmed` | 自動展開、進搜尋變體 | corpus_hits ≥ 50，或從 `law_abbreviations.json`（72 組）/ `synonym_seed.json`（事務所 seed）同步進來、或 accept 累積 ≥3 升上來 |
-| `candidate` | 不自動展開、字典保留 | corpus_hits 6–49，或 confirmed reject 累積 ≥2 降下來 |
-| `likely_typo` | 疑似錯字、不展開 | corpus_hits 1–5 |
-| `rejected` | 不展開 | corpus_hits = 0 |
+| `confirmed` | 自動展開、進搜尋變體 | 律師 ✓ 累積 ≥3 次、或 seed 檔進來（`law_abbreviations.json` 72 組 / `synonym_seed.json`）|
+| `candidate` | 不自動展開、UI 待確認清單 | Stage 3 精讀時 Claude 順便 discover |
+| `likely_typo` | 不展開 | 初次 upsert 時 corpus_hits 1–5 |
+| `rejected` | 不展開 | 律師 ✕ 累積 ≥2 次、或 corpus_hits=0 |
 
-Confirmed tier 永久存 `synonym_dictionary` 表、跨 task 共用。搜尋 pipeline 用 `only_confirmed=True` 模式只取 confirmed。實作在 [src/pipeline/synonym_expander.py](src/pipeline/synonym_expander.py) + [src/api/expansion.py](src/api/expansion.py)；thresholds 見 `src/db/database.py` 的 `_AUTO_PROMOTE_ACCEPTS` / `_AUTO_DEMOTE_REJECTS`。
+Confirmed tier 永久存 `synonym_dictionary` 表、跨 task 共用。搜尋 pipeline 用 `only_confirmed=True` 模式只取 confirmed。實作在 [src/pipeline/synonym_expander.py](src/pipeline/synonym_expander.py) + [src/api/expansion.py](src/api/expansion.py)；精讀 discovery 在 [src/pipeline/analyze.py `_persist_discovered_variants`](src/pipeline/analyze.py)；thresholds `_AUTO_PROMOTE_ACCEPTS=3` / `_AUTO_DEMOTE_REJECTS=2` 見 `src/db/database.py`。律師在「設定 → 同義詞庫 → 待確認」逐一 ✓ ✕ 建自己事務所的用語庫。
 
 ---
 
