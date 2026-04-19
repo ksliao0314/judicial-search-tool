@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+*.egg
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+
+# Virtual env
+.venv/
+venv/
+env/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code / agent local config
+.claude/
+
+# Runtime data (律師使用時才產生、不進 repo)
+judgment_search.db
+judgment_search.db-shm
+judgment_search.db-wal
+logs/
+data/parser_anomalies.jsonl
+data/*.log
+
+# MCP fork runtime cache（第一次跑會自動建）
+mcp-taiwan-legal-db/data/cache/
+mcp-taiwan-legal-db/data/.judicial_cookies.json
+mcp-taiwan-legal-db/mcp_taiwan_legal_db.egg-info/
+
+# Backup files
+*.backup
+*.bak
+
+# Env / secrets（API key 等、採 per-request header 傳遞；.env 供本地測試）
+.env
+.env.local
+*.pem
+*.key

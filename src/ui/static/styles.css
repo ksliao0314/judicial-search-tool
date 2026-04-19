@@ -1,0 +1,1256 @@
+* { -webkit-font-smoothing: antialiased; }
+
+    /* Persistent header nav tabs — 黑底白字 pill = active、灰字 = inactive */
+    .nav-tab {
+      color: #6E6E6C;
+      border-radius: 999px;
+      letter-spacing: 0.04em;
+    }
+    .nav-tab:hover { color: #111110; }
+    .nav-tab.nav-tab-active {
+      background: #111110;
+      color: #F7F7F5;
+    }
+    .nav-tab.nav-tab-active:hover { color: #F7F7F5; }
+
+    /* ── Design tokens — 與 Desktop 1440 設計對齊 ── */
+    :root {
+      --d-accent: #2A5BD7;        /* 精緻藍，取代 cyan 用於新設計元件 */
+      --d-accent-soft: #EAF0FD;
+      --d-accent-ink: #1A3D9A;
+      --d-ai-tint: #F5F3EC;       /* 進行中卡 warm neutral bg */
+      --d-ai-border: #DFD9C6;
+      --d-line: #E4E2DB;
+      --d-line-2: #EDEBE4;
+      --d-muted: #6E6E68;
+      --d-muted-2: #9A9A93;
+    }
+
+    /* ── Home: 搜尋區元件（設計版 B · 像素對齊）── */
+    .home-seg {
+      display: inline-flex; background: #F3F2ED;
+      border-radius: 999px; padding: 3px;
+    }
+    .home-seg-btn {
+      padding: 6px 18px; font-size: 12px;
+      color: var(--d-muted);
+      border-radius: 999px;
+      background: transparent; border: none;
+      cursor: pointer;
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      transition: background .14s, color .14s;
+    }
+    .home-seg-btn:hover { color: #111110; }
+    .home-seg-btn.on { background: #111110; color: #FFFFFF; }
+
+    .home-search-box {
+      background: #FFFFFF;
+      border: 1px solid var(--d-line);
+      border-radius: 8px;
+      padding: 14px 16px;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 14px;
+      transition: border-color .14s, box-shadow .14s;
+    }
+    .home-search-box:focus-within {
+      border-color: #111110;
+      box-shadow: 0 0 0 2px rgba(17,17,16,0.06);
+    }
+    .home-search-box input {
+      flex: 1; min-width: 0;
+      background: transparent; border: none; outline: none;
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      font-size: 14px; color: #111110;
+    }
+    /* 蓋掉 global input:focus-visible 的 cyan outline —
+       focus 指示由外框 .home-search-box:focus-within 的 border+shadow 提供，
+       內 input 不再顯示第二層 ring */
+    .home-search-box input:focus,
+    .home-search-box input:focus-visible {
+      outline: none !important;
+      outline-offset: 0 !important;
+      box-shadow: none;
+    }
+    .home-search-box input::placeholder { color: var(--d-muted-2); }
+    .home-search-box-chip {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; padding: 3px 9px;
+      border-radius: 4px; border: 1px solid var(--d-line);
+      color: #2B2B2A; background: #FFFFFF;
+      white-space: nowrap; letter-spacing: 0.02em;
+    }
+
+    .home-search-cta {
+      display: block; width: 100%;
+      background: #111110; color: #F7F7F5;
+      text-align: center; padding: 13px;
+      border-radius: 8px;
+      letter-spacing: 0.4em; font-size: 13px;
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      border: none; cursor: pointer;
+      transition: background .14s;
+    }
+    .home-search-cta:hover { background: #2B2B2A; }
+
+    /* ── 分析結果卡片 State C：左欄（設計版 ai tint + 題綱 serif 大標）── */
+    .result-left-col {
+      background: var(--d-ai-tint);
+      border-right: 1px solid var(--d-ai-border);
+    }
+    .result-kicker {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px; color: var(--d-muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    /* 關鍵字 chip：accent-soft 藍底（替代原 warm-200/600） */
+    #card-results-keyword-chip > span {
+      display: inline-flex; align-items: center;
+      padding: 3px 10px;
+      background: var(--d-accent-soft);
+      color: var(--d-accent-ink);
+      border: 1px solid #C9D6F3;
+      border-radius: 4px;
+      font-family: 'Noto Serif TC', serif; font-size: 12.5px;
+    }
+    /* 題綱大 serif 標題 */
+    .result-question {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 20px; font-weight: 600;
+      color: #111110; line-height: 1.4; letter-spacing: 0.01em;
+      margin: 0;
+    }
+    .result-scope {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--d-muted);
+    }
+    /* 追問輸入框 + 藍色 CTA */
+    .result-followup {
+      background: #FFFFFF;
+      border: 1px solid var(--d-line);
+      border-radius: 6px;
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 6px 6px 12px;
+      transition: border-color .14s;
+    }
+    .result-followup:focus-within { border-color: var(--d-accent); }
+    .result-followup-input {
+      flex: 1; min-width: 0;
+      background: transparent; border: none; outline: none;
+      font-family: 'Noto Serif TC', serif;
+      font-size: 13px; color: #111110;
+    }
+    .result-followup-input:focus,
+    .result-followup-input:focus-visible {
+      outline: none !important; box-shadow: none !important;
+    }
+    .result-followup-input::placeholder { color: var(--d-muted-2); }
+    .result-followup-submit {
+      background: var(--d-accent); color: #FFFFFF;
+      padding: 7px 14px; border-radius: 4px;
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      font-size: 12px; letter-spacing: 0.04em;
+      border: none; cursor: pointer;
+      transition: background .14s;
+    }
+    .result-followup-submit:hover { background: var(--d-accent-ink); }
+    .result-followup-submit:disabled {
+      background: var(--d-muted-2); cursor: not-allowed;
+    }
+    /* AI 綜合彙整 */
+    .result-synthesis {
+      background: transparent;
+      padding: 0;
+    }
+    .result-synthesis-title {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 14px; font-weight: 600; color: #111110;
+      letter-spacing: 0.02em;
+    }
+    .result-synthesis-consensus {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px; color: var(--d-muted);
+    }
+    .result-synthesis-body {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 13.5px; color: #2B2B2A;
+      line-height: 1.6; letter-spacing: 0.01em;
+      margin: 0; white-space: pre-wrap;
+    }
+
+    /* ── State B: 分析進度畫面（設計版風格指南）── */
+    .progress-question-b {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 20px; font-style: italic;
+      color: #2B2B2A; line-height: 1.55;
+      margin: 6px 0 28px;
+      letter-spacing: 0.02em;
+      /* 自動加前後「」引號 */
+    }
+    .progress-question-b:not(:empty)::before { content: '「'; color: var(--d-muted); }
+    .progress-question-b:not(:empty)::after  { content: '」'; color: var(--d-muted); }
+    .progress-question-b:empty { display: none; }
+
+    .progress-label-b {
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      font-size: 14px; color: #111110;
+      text-align: center;
+      letter-spacing: 0.04em;
+    }
+    .progress-bar-b {
+      height: 5px; background: var(--d-line-2);
+      border-radius: 999px; overflow: hidden;
+    }
+    .progress-fill-b {
+      height: 100%; border-radius: 999px;
+      background: #111110;
+      transition: width .5s cubic-bezier(.16,1,.3,1);
+    }
+    .progress-eta-b {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11.5px; color: var(--d-muted);
+      text-align: left;
+      margin-top: 2px;
+    }
+
+    /* Token ticker 在 progress-label 的 parent 內、設計版 left-align */
+    #card-token-ticker {
+      font-family: 'JetBrains Mono', monospace !important;
+      font-size: 11.5px !important;
+      color: var(--d-muted) !important;
+      text-align: left !important;
+      margin-top: 0 !important;
+    }
+
+    .progress-abort-b {
+      margin-top: 22px;
+      width: 100%;
+      border: 1px solid #FCA5A5;
+      background: #FEF2F2;
+      color: #DC2626;
+      padding: 12px;
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      font-size: 13px;
+      letter-spacing: 0.04em;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .14s, border-color .14s;
+    }
+    .progress-abort-b:hover {
+      background: #FEE2E2; border-color: #F87171;
+    }
+
+    /* ── Home: Kicker + 大標題（設計版 B · 編輯風大字）── */
+    .home-kicker {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px; color: var(--d-muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .home-bigq {
+      font-family: 'Noto Serif TC', 'EB Garamond', Georgia, serif;
+      font-size: 48px; line-height: 1.15;
+      font-weight: 600; letter-spacing: 0.02em;
+      color: #111110;
+      margin: 0 0 22px;
+    }
+    .home-bigq .dim { color: var(--d-muted-2); }
+
+    /* ── Home / History 共用 section header（沿用 outline L0 概念）── */
+    .home-section-header {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 400; font-size: 10.5px; color: var(--d-muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+      margin-bottom: 10px;
+      display: flex; align-items: baseline; justify-content: space-between;
+    }
+    .home-section-header-link {
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      font-size: 11px; letter-spacing: 0; color: var(--d-muted); text-transform: none;
+      cursor: pointer;
+    }
+    .home-section-header-link:hover { color: #111110; }
+
+    /* ── Recent card（最近完成、與設計版 B 一致）── */
+    .recent-card {
+      position: relative; display: block; cursor: pointer;
+      background: #FFFFFF; border: 1px solid var(--d-line);
+      border-radius: 8px;
+      padding: 16px 18px;
+      transition: border-color .14s, box-shadow .14s;
+    }
+    .recent-card:hover {
+      border-color: #CBCBC9;
+      box-shadow: 0 2px 8px rgba(0,0,0,.04);
+    }
+    .recent-card-kicker-row {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 10px;
+    }
+    .recent-card-dot {
+      display: inline-flex; align-items: center; gap: 6px;
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+      letter-spacing: 0.08em;
+    }
+    .recent-card-dot-interpretation { color: var(--d-accent-ink); }
+    .recent-card-dot-judgment       { color: var(--d-muted); }
+    .recent-card-dot-circle {
+      width: 5px; height: 5px; border-radius: 999px;
+    }
+    .recent-card-dot-interpretation .recent-card-dot-circle { background: var(--d-accent); }
+    .recent-card-dot-judgment .recent-card-dot-circle       { background: var(--d-muted); }
+    .recent-card-date {
+      font-family: 'JetBrains Mono', monospace; font-size: 10.5px; color: var(--d-muted);
+    }
+    .recent-card-title {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 17px; font-weight: 600; color: #111110;
+      letter-spacing: 0.01em; margin-bottom: 4px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .recent-card-subtitle {
+      font-size: 11.5px; color: var(--d-muted);
+      margin-bottom: 14px;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .recent-card-stats {
+      display: flex; align-items: center; gap: 10px;
+      padding-top: 10px; border-top: 1px solid var(--d-line-2);
+    }
+    .recent-card-score {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 20px; font-weight: 600; color: #111110; line-height: 1;
+    }
+    .recent-card-score-meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; color: var(--d-muted);
+    }
+    .recent-card-bar {
+      flex: 1; height: 3px; background: var(--d-line-2);
+      border-radius: 999px; position: relative; overflow: hidden; margin-left: 4px;
+    }
+    .recent-card-bar-fill {
+      position: absolute; inset: 0; background: #2B2B2A; border-radius: 999px;
+    }
+    .recent-card.is-interpretation .recent-card-bar-fill { background: var(--d-accent); }
+    .recent-card-cta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; color: var(--d-accent-ink);
+    }
+
+    /* ── Home 右欄進行中卡（warm neutral ai tint）── */
+    .active-card {
+      position: relative; display: block; cursor: pointer;
+      background: var(--d-ai-tint); border: 1px solid var(--d-ai-border);
+      border-radius: 8px;
+      padding: 12px 14px;
+      transition: background .14s;
+    }
+    .active-card:hover { background: #EEEADF; }
+    .active-card-row {
+      display: flex; align-items: center; gap: 10px;
+    }
+    .active-card-tag {
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+      background: #F3F2ED; color: var(--d-muted);
+      padding: 2px 6px; border-radius: 3px;
+    }
+    .active-card-title {
+      flex: 1; font-family: 'Noto Serif TC', serif;
+      font-size: 14.5px; color: #111110;
+      overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    }
+    .active-card-meta {
+      font-size: 11px; color: var(--d-muted); margin-top: 2px;
+    }
+    .active-card-cta {
+      margin-top: 10px;
+      background: #111110; color: #F7F7F5;
+      text-align: center; padding: 9px;
+      font-family: 'JetBrains Mono', monospace; font-size: 12px;
+      letter-spacing: 0.3em;
+      border-radius: 6px;
+    }
+    .active-card-cta:hover { background: #2B2B2A; }
+    .active-card-progress {
+      margin-top: 8px; height: 2px; background: rgba(0,0,0,0.08);
+      border-radius: 999px; overflow: hidden;
+    }
+    .active-card-progress-fill {
+      height: 100%; background: var(--d-accent);
+      transition: width .5s ease;
+    }
+
+    /* 右欄 section header 加 bottom 間距，讓第一張 card 上緣對齊左欄搜尋框上緣
+       （左欄 pill toggle 34.8px + mb-3 12px ≈ 47px；header 約 15px + 32 = 47px） */
+    .home-aside .home-section-header { margin-bottom: 32px; }
+
+    /* 空位 card（虛線）— 右欄永遠 3 格 */
+    .active-empty {
+      padding: 14px; border: 1px dashed var(--d-line);
+      border-radius: 8px;
+      background: transparent; color: var(--d-muted-2);
+      text-align: center; font-size: 11.5px;
+    }
+
+    /* ── History 頁 ── */
+    .history-page-header {
+      display: flex; align-items: baseline; gap: 14px; margin-bottom: 22px;
+    }
+    .history-page-title {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 28px; font-weight: 600; letter-spacing: 0.02em;
+      color: #111110; margin: 0;
+    }
+    .history-page-count {
+      font-size: 13px; color: var(--d-muted);
+    }
+
+    .history-tab {
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      padding: 6px 14px; border-radius: 999px;
+      font-size: 12px; color: var(--d-muted);
+      border: 1px solid var(--d-line);
+      background: transparent;
+      transition: background .14s, color .14s, border-color .14s;
+    }
+    .history-tab:hover { color: #111110; border-color: #CBCBC9; }
+    .history-tab-active {
+      background: #111110; color: #F7F7F5; border-color: #111110;
+    }
+    .history-tab-active:hover { color: #F7F7F5; border-color: #111110; }
+    .history-tab-count {
+      font-family: 'JetBrains Mono', monospace; font-size: 11px;
+      margin-left: 6px; opacity: 0.7;
+    }
+
+    .history-sort, .history-type {
+      color: #9E9E9C; transition: color .14s;
+      font-weight: 400;
+    }
+    .history-sort:hover, .history-type:hover { color: #111110; }
+    .history-sort-active, .history-type-active {
+      color: #111110; font-weight: 600;
+    }
+
+    /* ── History card — 2026-04-19 v2 redesign ──
+       統一暖米白底色，視覺整齊；進行中用 amber brown 左條區分（跟 excerpt 框同色系），
+       徹底去掉前版刺眼的藍；所有卡片統一 min-height，第一列不再被 CTA 拉高 */
+    .history-card {
+      position: relative;
+      display: flex; flex-direction: column;
+      border-radius: 8px; padding: 18px 20px 16px;
+      transition: transform .16s ease, box-shadow .16s ease,
+                  border-color .14s, background .14s;
+      cursor: pointer;
+      will-change: transform;
+      min-height: 192px;   /* 所有卡片同高，避免進行中 footer 多東西拉高一格 */
+    }
+    /* 2026-04-19 v3：不再用左邊色條區分進行中 / 已完成（律師反饋左條很醜）。
+       改走底色差異 —
+       - 已完成：暖米白紙感（ai-tint）
+       - 進行中：略暖略深的 tint（linen），跟完成卡並列時明顯但調性一致；
+         搭配 hover 時同色系的 shadow、右上角 amber 脈動小點表示「正在跑」 */
+    .history-card.is-completed {
+      background: var(--d-ai-tint);          /* #F5F3EC */
+      border: 1px solid var(--d-ai-border);  /* #DFD9C6 */
+    }
+    .history-card.is-active {
+      background: #EEE8D6;                   /* linen — 進行中專用，比完成卡深 */
+      border: 1px solid #D4CCB0;             /* 深一階的暖邊 */
+    }
+    .history-card.is-completed:hover,
+    .history-card.is-active:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 18px -4px rgba(60, 45, 20, .12),
+                  0 2px 6px -2px rgba(60, 45, 20, .08);
+    }
+    .history-card.is-completed:hover { border-color: #CFC6A8; }
+    .history-card.is-active:hover    { border-color: #B8AC89; }
+    .history-card.is-completed:active,
+    .history-card.is-active:active {
+      transform: translateY(0);
+      box-shadow: 0 1px 3px rgba(60, 45, 20, .08);
+      transition-duration: .06s;
+    }
+    /* 右上角 amber 脈動小點表示「這張還在動」，比色條低調 */
+    .history-card.is-active::after {
+      content: '';
+      position: absolute;
+      right: 14px; top: 22px;
+      width: 6px; height: 6px; border-radius: 50%;
+      background: #8B7355;
+      animation: history-active-pulse 1.8s ease-in-out infinite;
+    }
+    @keyframes history-active-pulse {
+      0%, 100% { opacity: 0.35; }
+      50%      { opacity: 1; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .history-card.is-active::after { animation: none; opacity: 0.7; }
+    }
+
+    .history-card-badge-row {
+      display: flex; align-items: center; justify-content: space-between;
+      font-family: 'JetBrains Mono', monospace; font-size: 10px;
+      letter-spacing: 0.08em;
+      margin-bottom: 10px;
+    }
+    /* preliminary chip：表示此 task 已有初步 synthesis 可看、仍在背景跑 retry */
+    .history-card-prelim-chip {
+      font-family: 'JetBrains Mono', monospace; font-size: 9.5px;
+      color: #92400E; background: #FEF3C7;
+      border: 1px solid #FCD34D;
+      padding: 1px 6px; border-radius: 3px;
+      letter-spacing: 0.1em;
+      margin-right: auto; margin-left: 8px;
+    }
+    /* 分類 pill：釋 = 酒紅（brand）、判 = sepia 棕（跟暖色卡片和諧）。
+       兩者透過底色明顯區分，但都在同一調性（warm earth tones），不會視覺打架 */
+    .history-card-domain-pill {
+      display: inline-flex; align-items: center;
+      font-family: 'Noto Serif TC', serif;
+      font-size: 11px; font-weight: 600; letter-spacing: 0.12em;
+      padding: 2px 9px; border-radius: 3px;
+    }
+    /* 釋 — 憲法解釋，酒紅（權威色） */
+    .history-card.is-interpretation .history-card-domain-pill {
+      color: #8B2500;
+      background: rgba(139, 37, 0, 0.06);
+      border: 1px solid rgba(139, 37, 0, 0.20);
+    }
+    /* 判 — 法院判決，sepia 棕（檔案色） */
+    .history-card.is-judgment .history-card-domain-pill {
+      color: #6D5A41;
+      background: rgba(109, 90, 65, 0.07);
+      border: 1px solid rgba(109, 90, 65, 0.22);
+    }
+    .history-card-date { color: var(--d-muted); font-size: 10.5px; }
+
+    .history-card-title {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 17px; font-weight: 600; color: #111110;
+      letter-spacing: 0.01em; line-height: 1.35;
+      margin-bottom: 4px;
+      overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+    .history-card-subtitle {
+      font-size: 11.5px; color: var(--d-muted);
+      line-height: 1.5;
+      margin-bottom: 14px;
+      overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+
+    /* 完成卡片的 stats footer — 只顯示筆數大字 */
+    .history-card-stats-footer {
+      display: flex; align-items: baseline; gap: 6px;
+      padding-top: 12px; border-top: 1px solid rgba(139, 37, 0, 0.10);
+      margin-top: auto;
+    }
+    .history-card-stats-count {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 26px; font-weight: 600; color: #111110; line-height: 1;
+      letter-spacing: 0.01em;
+    }
+    .history-card-stats-unit {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 12px; color: var(--d-muted);
+      font-weight: 400;
+    }
+    .history-card-stats-meta {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; color: var(--d-muted);
+    }
+
+    /* 進行中卡片的 footer — 2026-04-19 v2：跟完成卡 footer 同 layout（baseline 對齊、
+       borderTop 細線），只差在顯示「phase 文字」而非 match_count 數字。這樣卡片高度
+       一致，進行中跟完成視覺節奏對齊 */
+    .history-card-active-footer {
+      display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
+    }
+    .history-card-active-phase {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 14px; color: #2B2B2A; font-weight: 500;
+      line-height: 1.3;
+    }
+    .history-card-active-count {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--d-muted);
+    }
+
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: #CBCBC9; border-radius: 3px; }
+
+    /* P1-8: Touch targets — icon-only buttons (small close/bell/gear) get 44px hit area.
+       Only set min-width/height, DO NOT override display (would break Tailwind flex layout). */
+    button[aria-label] { min-width: 44px; min-height: 44px; }
+    /* P1-9: Clickable elements with onclick get pointer */
+    [onclick] { cursor: pointer; }
+    /* P1-12: Excerpt / judgment text line-height */
+    .hit-mark, .card-result-row p { line-height: 1.6; }
+
+    .field-check input[type=checkbox] { display: none; }
+    .field-check label {
+      display: inline-flex; align-items: center; gap: 5px;
+      cursor: pointer; font-size: 0.8125rem; color: #666663; transition: color .15s;
+    }
+    .field-check label .box {
+      width: 14px; height: 14px; border: 1.5px solid #CBCBC9; border-radius: 2px;
+      display: flex; align-items: center; justify-content: center; transition: all .15s; flex-shrink: 0;
+    }
+    .field-check input:checked + label { color: #6D5A41; }
+    .field-check input:checked + label .box { background: #6D5A41; border-color: #6D5A41; }
+    .field-check input:checked + label .box::after {
+      content: ''; width: 8px; height: 5px;
+      border-left: 1.5px solid #F7F7F5; border-bottom: 1.5px solid #F7F7F5;
+      transform: rotate(-45deg) translateY(-1px);
+    }
+
+    .analysis-tab { position: relative; padding-bottom: 10px; cursor: pointer; white-space: nowrap; transition: color .15s; }
+    .analysis-tab::after { content: ''; position: absolute; bottom: 0; left: 0; right: 0; height: 2px; background: transparent; transition: background .2s; }
+    .analysis-tab.active { color: #111110; }
+    .analysis-tab.active::after { background: #111110; }
+
+    .judgment-row { transition: background .12s; }
+    .judgment-row:hover { background: #F0F0EE; }
+    .judgment-row.match-yes { background: rgba(109,90,65,.05); }
+    .judgment-row.match-partial { background: rgba(109,90,65,.025); }
+    .judgment-row.selected { background: rgba(109,90,65,.08); outline: 1px solid rgba(109,90,65,.3); outline-offset: -1px; }
+
+    .score-bar-fill { width: 0; transition: width .8s cubic-bezier(.16,1,.3,1); }
+    .hit-mark { background: rgba(109,90,65,.08); border: 1px solid rgba(109,90,65,.22); border-radius: 2px; padding: 0 3px; }
+
+    @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
+    .pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
+    @keyframes progress-stripe {
+      from { background-position: 0 0; } to { background-position: 28px 0; }
+    }
+    .progress-running {
+      background-image: repeating-linear-gradient(45deg,transparent,transparent 5px,rgba(0,0,0,.06) 5px,rgba(0,0,0,.06) 10px);
+      animation: progress-stripe .8s linear infinite;
+    }
+    @keyframes fade-in { from { opacity:0; transform:translateY(6px); } to { opacity:1; transform:translateY(0); } }
+    .fade-in { animation: fade-in .3s ease both; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .spin { animation: spin .8s linear infinite; }
+
+    @keyframes dot-warn { 0%,100% { opacity:1; } 50% { opacity:.4; } }
+    .dot-warn { animation: dot-warn 2s ease-in-out infinite; }
+
+    /* P0-6: Respect prefers-reduced-motion */
+    @media (prefers-reduced-motion: reduce) {
+      .pulse-dot, .spin, .dot-warn, .progress-running, .fade-in { animation: none !important; }
+      .fade-in { opacity: 1; transform: none; }
+    }
+
+    /* Dropdown */
+    .dd-menu { transform-origin: top; transition: transform .15s, opacity .15s; }
+    .dd-menu.hidden { transform: scaleY(.92); opacity: 0; pointer-events: none; }
+
+    /* Focus rings */
+    button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
+      outline: 2px solid #111110; outline-offset: 2px;
+    }
+    button { cursor: pointer; }
+
+    /* Reader (State C) */
+    #results-reader-panel { position:absolute; inset:0; }
+    .reader-field-tab.active { border-bottom-color: #111110; color: #111110; }
+    .reader-field-tab { border-bottom-color: transparent; }
+
+    /* Results section */
+    #view-results { position: relative; }
+
+    /* Home search inputs — #semantic-search 只在舊 DOM 保留；
+       #main-search 的 focus 已由 .home-search-box wrapper 統一處理 */
+    #semantic-search {
+      background: #FFFFFF;
+      box-shadow: 0 0 0 1.5px #E3E3E1, 0 2px 8px rgba(0,0,0,.04);
+      transition: box-shadow .2s;
+    }
+    #semantic-search:focus {
+      box-shadow: 0 0 0 2px #111110, 0 0 0 4px rgba(17,17,16,.08);
+    }
+
+    /* Q&A thread */
+    #reader-qa-thread { max-height: 200px; overflow-y: auto; }
+
+    /* Settings drawer tabs */
+    .settings-tab {
+      position: relative; color: #9E9E9C; transition: color .15s; white-space: nowrap;
+      padding-bottom: 12px; padding-top: 12px;
+    }
+    .settings-tab::after {
+      content: ''; position: absolute; bottom: 0; left: 8px; right: 8px;
+      height: 2px; background: transparent; transition: background .15s;
+    }
+    .settings-tab.active { color: #111110; }
+    .settings-tab.active::after { background: #111110; }
+
+    /* Stage 2 dual-thumb range slider —
+       兩個 input[type=range] 重疊；track 用透明 + pointer-events:none，
+       讓 thumb 才能被拖（避免兩個 input 互相擋住對方的 thumb）。 */
+    .range-thumb { height: 100%; }
+    .range-thumb::-webkit-slider-runnable-track { background: transparent; height: 100%; }
+    .range-thumb::-moz-range-track { background: transparent; height: 100%; }
+    .range-thumb::-webkit-slider-thumb {
+      -webkit-appearance: none; appearance: none;
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #F7F7F5; border: 2px solid #6D5A41;
+      cursor: grab; pointer-events: auto;
+      box-shadow: 0 1px 3px rgba(0,0,0,.15);
+      transition: transform .1s, background .15s;
+    }
+    .range-thumb::-webkit-slider-thumb:hover { background: #6D5A41; }
+    .range-thumb::-webkit-slider-thumb:active { cursor: grabbing; transform: scale(1.1); }
+    .range-thumb::-moz-range-thumb {
+      width: 16px; height: 16px; border-radius: 50%;
+      background: #F7F7F5; border: 2px solid #6D5A41;
+      cursor: grab; pointer-events: auto;
+      box-shadow: 0 1px 3px rgba(0,0,0,.15);
+    }
+    .range-thumb::-moz-range-thumb:hover { background: #6D5A41; }
+
+    /* Tier badges — light mode */
+    .tier-confirmed  { background:rgba(5,150,105,.07);  border-color:rgba(5,150,105,.25);  color:#047857; }
+    .tier-candidate  { background:rgba(217,119,6,.07);  border-color:rgba(217,119,6,.22);  color:#b45309; }
+    .tier-likely_typo{ background:rgba(120,113,108,.08); border-color:rgba(120,113,108,.2); color:#78716c; }
+    .tier-rejected   { background:rgba(220,38,38,.06);  border-color:rgba(220,38,38,.2);   color:#dc2626; text-decoration:line-through; }
+
+    /* ── Search card ── */
+    .hit-preview-fade {
+      background: linear-gradient(to top, #F7F7F5 0%, transparent 100%);
+    }
+    @keyframes bell-pulse { 0%,100% { transform:scale(1); } 50% { transform:scale(1.15); } }
+    .bell-new { animation: bell-pulse .5s ease; }
+
+    /* Card result row — 2026-04-19：拿掉藍底 hover（律師反饋），保留 cursor */
+    .card-result-row { cursor: pointer; }
+
+    /* Cluster tab — 2026-04-19：從藍色 pill 改成跟 reader 內「中性」direction pill
+       同一調性的暖米白 pill（warm ai tint + amber border + amber text），讓任務
+       分析頁跟判決本文的視覺語言對齊 */
+    .cluster-tab {
+      padding: 5px 13px; font-size: 12px;
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      border: 1px solid var(--d-line, #E4E2DB); color: var(--d-muted, #6E6E68);
+      background: #FFFFFF;
+      cursor: pointer; transition: all .14s;
+      border-radius: 999px;
+      display: inline-flex; align-items: center; gap: 4px;
+    }
+    .cluster-tab:hover { color: #111110; border-color: #CBCBC9; }
+    .cluster-tab.active {
+      background: var(--d-ai-tint);
+      border-color: var(--d-ai-border);
+      color: #6D5A41;
+      font-weight: 600;
+    }
+
+    /* Results sort buttons — 設計版「推薦排序｜時間排序」無邊框文字 */
+    .result-sort-btn {
+      color: var(--d-muted); transition: color .14s;
+      background: transparent; border: none;
+    }
+    .result-sort-btn:hover { color: #111110; }
+    .result-sort-btn.result-sort-active { color: #111110; font-weight: 500; }
+
+    /* Reader card */
+    .rc-section-tab {
+      position: relative; color: #9E9E9C; transition: color .15s; cursor: pointer;
+    }
+    .rc-section-tab::after {
+      content: ''; position: absolute; bottom: 0; left: 4px; right: 4px;
+      height: 2px; background: transparent; transition: background .15s;
+    }
+    .rc-section-tab.active { color: #111110; }
+    .rc-section-tab.active::after { background: #111110; }
+    /* Reader 2-column bg：左米色 / 右近白（設計版 cream + off-white）*/
+    .rc-outline {
+      background: #F5F3EC;  /* warm cream，跟 State C 左欄一致 */
+      width: 22%;
+      transition: width .25s ease, padding .25s ease, opacity .2s ease;
+    }
+    /* 側欄收合 chevron：懸在 outline/content 分界，active state 讓 icon 翻轉方向 */
+    .rc-sidebar-toggle-btn {
+      position: absolute; z-index: 10;
+      width: 22px; height: 22px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 999px;
+      background: #F7F7F5;
+      border: 1px solid #E4E2DB;
+      color: #6E6E68;
+      transition: left .25s ease, color .15s, border-color .15s, transform .25s ease;
+      box-shadow: 0 1px 2px rgba(0,0,0,.06);
+      cursor: pointer;
+      /* 位置：outline 右邊緣，垂直置中偏上一點（與 meta header 的 baseline 貼合） */
+      left: calc(22% - 11px);
+      top: calc(50% + 20px);
+      transform: translateY(-50%);
+    }
+    .rc-sidebar-toggle-btn:hover {
+      color: #111110; border-color: #CBCBC9;
+    }
+    /* 側欄收合 → 按鈕貼到最左側，icon 翻轉 180° 變成「▷ 展開」*/
+    #reader-card-inner[data-sidebar-collapsed="true"] .rc-sidebar-toggle-btn {
+      left: 4px;
+    }
+    #reader-card-inner[data-sidebar-collapsed="true"] .rc-sidebar-toggle-btn svg {
+      transform: rotate(180deg);
+    }
+    .rc-sidebar-toggle-btn svg { transition: transform .25s ease; }
+
+    /* 當事人 collapsible — 參考設計版「◎ 當事人 · 展開」refined 樣式 */
+    .rc-parties {
+      border-bottom: 1px solid var(--d-line-2);
+      padding-bottom: 12px;
+    }
+    .rc-parties-summary {
+      display: inline-flex; align-items: center; gap: 8px;
+      cursor: pointer; list-style: none;
+      padding: 4px 0;
+      color: var(--d-muted);
+      transition: color .15s;
+      user-select: none;
+    }
+    .rc-parties-summary::-webkit-details-marker { display: none; }
+    .rc-parties-summary:hover { color: #111110; }
+    .rc-parties-label {
+      font-family: 'Noto Serif TC', serif; font-size: 14px;
+      color: #111110; font-weight: 600; letter-spacing: 0.02em;
+    }
+    .rc-parties-toggle-text {
+      font-family: 'JetBrains Mono', monospace; font-size: 10.5px;
+      color: var(--d-muted); letter-spacing: 0.06em;
+    }
+    .rc-parties-chevron {
+      color: var(--d-muted);
+      transition: transform .2s ease;
+    }
+    .rc-parties[open] .rc-parties-chevron { transform: rotate(180deg); }
+    .rc-parties-body {
+      margin-top: 10px;
+    }
+    .rc-scroll {
+      background: #FDFDFB;  /* 近白，跟 outline 對比拉出層次 */
+    }
+    /* 側欄收合狀態：寬度歸 0、內容淡出；透過 rc-content-panel data 屬性觸發 */
+    #rc-content-panel[data-sidebar-collapsed="true"] .rc-outline {
+      width: 0; padding-left: 0; padding-right: 0; opacity: 0;
+      pointer-events: none;
+    }
+
+    /* 判決架構 kicker — 側欄頂部 uppercase 小字 */
+    .rc-outline-kicker {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; color: var(--d-muted);
+      letter-spacing: 0.12em; text-transform: uppercase;
+    }
+
+    /* Outline sidebar — 判決書目錄風格：
+       - L0（主文/理由）= 中等字級粗 serif，active 用 ink 黑 pill
+       - L1（一、二、…）= hanging indent，標記懸邊
+       - L2（（一）（二）…）= 更深 hanging indent
+       - 文字允許 wrap 到兩行（line-clamp），不再 nowrap + ellipsis 硬切 */
+    .rc-outline-item {
+      display: block; text-align: left; cursor: pointer; position: relative;
+      font-family: 'Noto Serif TC', 'EB Garamond', Georgia, serif;
+      font-size: 13px; line-height: 1.55; color: #2B2B2A;
+      padding: 3px 10px; border-radius: 4px;
+      transition: background .14s, color .14s;
+      letter-spacing: 0.02em;
+      white-space: normal; word-break: break-word;
+      overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+    .rc-outline-item:hover { background: rgba(0,0,0,.05); color: #111110; }
+
+    /* Reader header — 設計版兩行 meta（案名+日期 / 議題·案由）*/
+    .rc-meta-title-row {
+      display: flex; align-items: baseline; gap: 12px;
+      flex-wrap: wrap;
+    }
+    .rc-meta-title {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 18px; font-weight: 600;
+      color: #111110; letter-spacing: 0.02em;
+      line-height: 1.25;
+    }
+    .rc-meta-date {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; color: var(--d-muted);
+    }
+    .rc-meta-cause-row {
+      display: flex; align-items: center; gap: 8px;
+      margin-top: 2px;
+    }
+    .rc-meta-kicker {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px; color: var(--d-muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .rc-meta-cause-dot {
+      width: 4px; height: 4px; border-radius: 999px;
+      background: #111110; display: inline-block;
+    }
+    .rc-meta-cause {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 13px; color: #2B2B2A;
+      letter-spacing: 0.01em;
+    }
+
+    /* L0: section header（主文 / 事實 / 理由）— 中等 serif 標題
+       - Active = ink 黑 pill 白字（參考設計版，強烈定位訊號）
+       - Inactive = 純 ink 黑粗體，無底 */
+    .rc-outline-level-0 {
+      font-weight: 700; color: #111110;
+      font-size: 14.5px; line-height: 1.35;
+      padding: 5px 10px;
+      margin-top: 12px;
+      letter-spacing: 0.04em;
+      border-radius: 4px;
+      -webkit-line-clamp: 1;
+    }
+    /* 第一個 L0 不加 margin（避免頂部多一塊空白）*/
+    .rc-outline-item.rc-outline-level-0:first-child { margin-top: 0; }
+
+    /* L0 active — ink 黑 pill + 白字（位置標記感） */
+    .rc-outline-item.rc-outline-level-0.active {
+      background: #111110;
+      color: #F7F7F5;
+      font-weight: 700;
+    }
+    .rc-outline-item.rc-outline-level-0.active:hover {
+      background: #2B2B2A;
+      color: #F7F7F5;
+    }
+    .rc-outline-item.rc-outline-level-0:hover {
+      background: rgba(0,0,0,.05); color: #111110;
+    }
+
+    /* L1: 「一、當事人」等 — hanging indent，標記懸邊 */
+    .rc-outline-level-1 {
+      font-weight: 500; color: #2B2B2A;
+      font-size: 12.5px;
+      padding: 3px 10px 3px 24px;
+      text-indent: -14px;
+      line-height: 1.55;
+    }
+    /* L1 active — 統一為黑 pill + 白字（與 L0 一致）
+       字重保持 500（跟 inactive 相同），避免切換時重排造成字型跳動 */
+    .rc-outline-item.rc-outline-level-1.active {
+      background: #111110;
+      color: #F7F7F5;
+      border-left: none;
+    }
+
+    /* L2:（一）... — 更深的 hanging indent */
+    .rc-outline-level-2 {
+      font-weight: 500; font-size: 11.5px; color: #56564F;
+      padding: 2px 10px 2px 42px;
+      text-indent: -18px;
+      line-height: 1.55;
+    }
+    /* L2 active — 統一為黑 pill + 白字（與 L0、L1 一致），字重不變 */
+    .rc-outline-item.rc-outline-level-2.active {
+      background: #111110;
+      color: #F7F7F5;
+      border-left: none;
+    }
+
+    /* Outline 文字渲染穩定化：
+       - antialiased 讓 dark→light 色切換時不觸發 subpixel AA 重算
+       - text-rendering: geometricPrecision 鎖定 glyph 度量、避免 LCD AA 造成「底色變化時字型位移一個 px」
+       L0/L1/L2 的 font-weight 已分別統一 inactive ↔ active 相同（700/500/500），
+       底色切換純粹 paint，不會觸發 reflow */
+    .rc-outline-item {
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      text-rendering: geometricPrecision;
+    }
+
+    /* Reader 字型大小切換（預設 15px；小 14px；大 17px） */
+    #rc-text { font-size: 15px; }
+    #rc-text.rc-font-small { font-size: 14px; }
+    #rc-text.rc-font-large { font-size: 17px; }
+
+    /* Task list filter buttons */
+    .tasklist-filter {
+      padding: 4px 12px; font-size: 11px; font-family: 'JetBrains Mono', monospace;
+      border: 1px solid #E3E3E1; color: #666663; cursor: pointer; transition: all .15s; border-radius: 2px;
+    }
+    .tasklist-filter:hover { border-color: #111110; color: #111110; }
+    .tasklist-filter.active { background: rgba(109,90,65,.1); border-color: #6D5A41; color: #6D5A41; }
+
+    /* Reader keyword highlight */
+    .rc-kw-hit { color: #DC2626; }
+
+    /* 關掉 Chrome scroll anchoring：當 rc-text 上方內容（例如 AI 評價區塊、字型
+       lazy load、後 render）導致高度變動時，Chrome 預設會自動調整 scrollTop 來
+       「保持你看的位置」，但結果常像螢幕跳動。這份內容是律師長時間靜態閱讀，
+       不需要這個 auto-correction，明確關掉避免不規律跳動。 */
+    #rc-text, #rc-scroll { overflow-anchor: none; }
+
+    /* Reader 邊界提示 toast：上下篇到頭/尾時短暫顯示「已是第一/最後一則」。
+       絕對定位於 reader-card 底部置中、ink 暗背 + parchment 文字、1.5s 自動淡出。 */
+    .reader-toast {
+      position: absolute;
+      bottom: 32px;
+      left: 50%;
+      transform: translateX(-50%);
+      background: rgba(28, 25, 23, .92);
+      color: #F5F0E8;
+      font-family: 'Noto Serif TC', serif;
+      font-size: 13px;
+      padding: 8px 18px;
+      border-radius: 4px;
+      box-shadow: 0 4px 12px rgba(0,0,0,.18);
+      z-index: 60;
+      opacity: 1;
+      transition: opacity .3s ease-out;
+      pointer-events: none;
+      letter-spacing: .05em;
+    }
+    .reader-toast-fade { opacity: 0; }
+
+    /* 分析結果列表的摘要框（ai tint + amber brown），跟 reader 內的原文摘錄視覺統一 */
+    .result-excerpt-box {
+      background-color: var(--d-ai-tint);
+      border: 1px solid var(--d-ai-border);
+      border-left: 3px solid #8B7355;
+      border-radius: 3px;
+      padding: 8px 12px !important;
+      color: #2B2B2A !important;
+    }
+
+    /* Reader: AI 評價區塊內「原文摘錄」框 — 設計版 warm ai tint + amber brown border */
+    .ai-eval-excerpt {
+      cursor: pointer;
+      background-color: var(--d-ai-tint);
+      border: 1px solid var(--d-ai-border);
+      border-left: 4px solid #8B7355;
+      border-radius: 4px;
+      padding: 14px 18px !important;
+      transition: background-color .15s, border-left-color .15s;
+    }
+    .ai-eval-excerpt:hover {
+      background-color: #EEEADF;
+      border-left-color: #6D5A41;
+    }
+
+    /* AI 評價區塊頂部：Kicker + 標題 + 大 score + /max + direction pill
+       margin-bottom 10px（參考設計稿：title 與 position 之間較緊，避免空白過多） */
+    .ai-eval-header-row {
+      display: flex; justify-content: space-between; align-items: baseline;
+      margin-bottom: 10px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--d-line-2);
+    }
+    .ai-eval-title {
+      display: flex; align-items: baseline; gap: 10px;
+      flex-wrap: wrap;
+    }
+    .ai-eval-kicker {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10.5px; color: var(--d-muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+    }
+    .ai-eval-label {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 17px; font-weight: 600; color: #111110;
+      letter-spacing: 0.02em;
+    }
+    .ai-eval-score {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 28px; font-weight: 600; color: #111110;
+      line-height: 1; letter-spacing: -0.01em;
+      margin-left: 4px;
+    }
+    .ai-eval-score-max {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 12px; color: var(--d-muted-2);
+    }
+    /* Direction pill：設計版 ai tint + amber 棕 */
+    .ai-eval-direction {
+      font-family: 'Noto Sans TC', system-ui, sans-serif;
+      font-size: 12px; padding: 4px 14px;
+      border-radius: 999px;
+      border: 1px solid var(--d-ai-border);
+      background: var(--d-ai-tint);
+      color: #8B7355;
+    }
+    .ai-eval-direction-support {
+      background: #ECFDF5; border-color: #A7F3D0; color: #047857;
+    }
+    .ai-eval-direction-oppose {
+      background: #FEF2F2; border-color: #FCA5A5; color: #B91C1C;
+    }
+    .ai-eval-direction-neutral { /* 上面 default 就是 neutral 樣式 */ }
+    /* 摘要 position 文字 */
+    .ai-eval-position {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 14px; color: #2B2B2A;
+      line-height: 1.8; letter-spacing: 0.01em;
+      margin: 0 0 4px;
+    }
+
+    /* 原文摘錄文字本體：max-height 控高、內捲 — 點擊區域仍維持整框 */
+    .ai-eval-excerpt-text {
+      max-height: 11em;     /* ~8 行 13px serif，再多就內捲 */
+      overflow-y: auto;
+      scrollbar-width: thin;
+    }
+    .ai-eval-excerpt-text::-webkit-scrollbar       { width: 6px; }
+    .ai-eval-excerpt-text::-webkit-scrollbar-thumb { background: #C8C4BC; border-radius: 3px; }
+
+    /* ── Reader「歷史分析」tab 卡片 ──
+       視覺語言跟判決本文 tab 的 .ai-eval-* 對齊 — 同一份判決、只是來自不同 task */
+    .rc-hist-overview {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--d-muted);
+      letter-spacing: 0.08em; text-transform: uppercase;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--d-line-2);
+    }
+    .rc-hist-overview strong {
+      color: #111110; font-weight: 600;
+      font-size: 13px;
+    }
+    .rc-hist-empty {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 13px; color: var(--d-muted);
+      padding: 40px 0; text-align: center;
+    }
+
+    .rc-hist-card {
+      background: #FFFFFF;
+      border: 1px solid var(--d-line-2);
+      border-radius: 6px;
+      padding: 18px 22px 16px;
+      display: flex; flex-direction: column; gap: 12px;
+      transition: border-color .14s, box-shadow .14s;
+    }
+    .rc-hist-card:hover {
+      border-color: var(--d-ai-border);
+      box-shadow: 0 2px 8px -2px rgba(60, 45, 20, .08);
+    }
+
+    .rc-hist-header {
+      display: flex; align-items: baseline;
+      justify-content: space-between; gap: 16px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid var(--d-line-2);
+    }
+    .rc-hist-title-wrap {
+      display: flex; align-items: baseline; gap: 10px;
+      flex: 1; min-width: 0;
+    }
+    .rc-hist-question {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 17px; font-weight: 600; color: #111110;
+      letter-spacing: 0.01em; line-height: 1.4;
+      margin: 0;
+      overflow: hidden;
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
+    .rc-hist-score-wrap {
+      display: flex; align-items: baseline; gap: 8px; flex-shrink: 0;
+    }
+
+    .rc-hist-meta {
+      display: flex; align-items: center; gap: 10px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px; color: var(--d-muted);
+    }
+    .rc-hist-task-chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px 3px 8px;
+      border-radius: 999px;
+      background: var(--d-ai-tint);
+      border: 1px solid var(--d-ai-border);
+      color: #6D5A41;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      cursor: pointer;
+      transition: background .14s, border-color .14s, transform .12s;
+    }
+    .rc-hist-task-chip:hover {
+      background: #EEE8D6;
+      border-color: #CFC6A8;
+    }
+    .rc-hist-task-chip:active { transform: translateY(1px); }
+    .rc-hist-task-chip-static { cursor: default; }
+    .rc-hist-task-chip-static:hover { background: var(--d-ai-tint); border-color: var(--d-ai-border); }
+    .rc-hist-task-chip-kicker {
+      font-size: 9px; opacity: 0.65;
+      text-transform: uppercase; letter-spacing: 0.14em;
+    }
+    .rc-hist-task-chip-name {
+      font-family: 'Noto Serif TC', serif;
+      font-weight: 600;
+      font-size: 12px;
+    }
+    .rc-hist-date {
+      color: var(--d-muted-2); letter-spacing: 0.02em;
+    }
+
+    .rc-hist-position {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 14px; color: #2B2B2A;
+      line-height: 1.8; letter-spacing: 0.01em;
+      margin: 0;
+    }
+
+    .rc-hist-excerpt-wrap {
+      background: var(--d-ai-tint);
+      border: 1px solid var(--d-ai-border);
+      border-left: 4px solid #8B7355;
+      border-radius: 4px;
+      padding: 12px 16px;
+    }
+    .rc-hist-excerpt-kicker {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px; color: #8B7355;
+      letter-spacing: 0.1em; text-transform: uppercase;
+      margin-bottom: 6px;
+    }
+    .rc-hist-excerpt-text {
+      font-family: 'Noto Serif TC', serif;
+      font-size: 13.5px; color: #2B2B2A;
+      line-height: 1.75;
+    }
+
+    /* Reader: 跳轉後目標段落 flash highlight
+       2026-04-19：從 cyan 改成與 .ai-eval-excerpt（原文摘錄框）相同的暖米白 +
+       amber brown accent。使用者點擊摘錄框 → 跳到原文對應段 → 底色延續摘錄框視覺，
+       視線過渡自然。
+       用 box-shadow inset + background-color，**完全不佔 layout 空間**（純 paint），
+       避免原本用 border-left + 負 margin 的 sub-pixel 寬度差異讓 text-align justify
+       的中文段落重排產生跳動感。
+       Flash 從強色漸淡到「持久淡標記」狀態（不消失），律師可以一直看到剛跳到哪段；
+       下一次點別的摘錄時 JS 會把舊的 .rc-flash-target class 清掉、套到新段。
+       prefers-reduced-motion 使用者：用靜態淡標記，不做動畫漸變 */
+    @keyframes rc-flash {
+      0%   { background-color: rgba(139, 115, 85, 0.22); box-shadow: inset 3px 0 0 #8B7355; }
+      100% { background-color: var(--d-ai-tint);         box-shadow: inset 3px 0 0 rgba(139, 115, 85, .55); }
+    }
+    @media (prefers-reduced-motion: no-preference) {
+      .rc-flash-target { animation: rc-flash 1.5s ease-out forwards; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      .rc-flash-target {
+        background-color: var(--d-ai-tint);
+        box-shadow: inset 3px 0 0 rgba(139, 115, 85, .55);
+      }
+    }
+
+    /* Bell dropdown item */
+    .bell-item { transition: background .12s; cursor: pointer; }
+    .bell-item:hover { background: #F0F0EE; }
+    .bell-item-progress {
+      height: 3px; background: #E3E3E1; border-radius: 2px; overflow: hidden;
+    }
+    .bell-item-progress-fill {
+      height: 100%; background: #6D5A41; border-radius: 2px; transition: width .5s ease;
+    }

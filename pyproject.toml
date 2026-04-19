@@ -1,0 +1,42 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "judgment-search"
+version = "0.1.0"
+description = "司法院判決 AI 篩選工具"
+requires-python = ">=3.11"
+# 注意：mcp-taiwan-legal-db 刻意不列在 dependencies。
+# 我們用的是專案內的 fork（./mcp-taiwan-legal-db/），需要在 setup 時手動：
+#   pip install -e ./mcp-taiwan-legal-db
+# 自動依賴會拉 upstream 版本，覆蓋 fork 的修改（max_results=500 clamp、month/day
+# 參數、search cache key、court fallback 等）。詳見 CLAUDE.md 設定說明。
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.32.0",
+    "aiosqlite>=0.20.0",
+    "anthropic>=0.40.0",
+    "httpx>=0.27.0",
+    "python-multipart>=0.0.12",
+    "sse-starlette>=2.1.0",
+    "pydantic>=2.9.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-httpx>=0.32.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]

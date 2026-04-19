@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>判決檢索</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=EB+Garamond:ital,wght@0,400;0,500;0,600;1,400;1,500;1,700&family=Noto+Serif+TC:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          colors: {
+            parchment: '#F7F7F5',
+            ink: '#111110',
+            seal: { DEFAULT: '#6D5A41', dim: '#4E3F2B', ghost: 'rgba(109,90,65,0.08)' },
+            warm: {
+              50:  '#F0F0EE',
+              100: '#E3E3E1',
+              200: '#CBCBC9',
+              300: '#9E9E9C',
+              400: '#666663',
+              500: '#444441',
+            },
+          },
+          fontFamily: {
+            serif: ['"EB Garamond"', '"Noto Serif TC"', 'Georgia', 'serif'],
+            mono:  ['"JetBrains Mono"', 'Menlo', 'monospace'],
+          },
+        }
+      }
+    }
+  </script>
+
+  <link rel="stylesheet" href="styles.css" />
+</head>
+
+<body class="bg-parchment text-ink font-serif h-screen flex flex-col overflow-hidden">
+
+  <!-- Skip link for keyboard navigation -->
+  <a href="#main-search" class="sr-only focus:not-sr-only focus:absolute focus:top-2 focus:left-2 focus:z-[999]
+     focus:bg-ink focus:text-parchment focus:px-4 focus:py-2 focus:text-sm focus:font-mono">
+    跳至搜尋
+  </a>
+
+  <!-- ══════════════════════════════════════════════
+       PERSISTENT HEADER — 跨 view 永久顯示
+  ══════════════════════════════════════════════ -->
+  <header id="app-header" class="shrink-0 border-b border-warm-200 bg-parchment/95 backdrop-blur-sm z-[30]">
+    <div class="max-w-[1400px] mx-auto grid grid-cols-[auto_1fr_auto] items-center px-6 h-12 gap-6">
+      <!-- Logo -->
+      <button data-nav-target="home" class="font-serif font-semibold text-[17px] text-ink tracking-wide whitespace-nowrap hover:opacity-80 transition-opacity">
+        判決檢索
+      </button>
+      <!-- Nav tabs — 水平置中，logo 左 / utility 右維持兩側均衡 -->
+      <nav class="justify-self-center flex items-center gap-1">
+        <button data-nav-target="home"
+          class="nav-tab nav-tab-active px-4 py-1.5 text-sm font-serif transition-colors">
+          首頁
+        </button>
+        <button data-nav-target="history"
+          class="nav-tab px-4 py-1.5 text-sm font-serif transition-colors">
+          歷史搜尋
+        </button>
+      </nav>
+      <!-- Utility icons -->
+      <div class="flex items-center gap-2">
+        <!-- Workers indicator — 顯示「執行中 N，排隊 M」讓律師知道系統狀態 -->
+        <span id="workers-indicator"
+          class="hidden font-mono text-[10px] text-warm-500 bg-warm-50 border border-warm-200 rounded-sm px-2 py-1"
+          title=""></span>
+        <!-- Notification bell -->
+        <div class="relative" id="bell-wrap">
+          <button id="btn-bell" aria-label="通知"
+            class="flex items-center justify-center w-8 h-8 border border-warm-200
+                   text-warm-400 hover:text-ink hover:border-warm-400 transition-colors rounded-sm">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/>
+              <path d="M13.73 21a2 2 0 0 1-3.46 0"/>
+            </svg>
+          </button>
+          <span id="bell-badge"
+            class="hidden absolute -top-1.5 -right-1.5 min-w-[18px] h-[18px] bg-red-500
+                   text-white text-[10px] font-mono rounded-full flex items-center justify-center
+                   leading-none px-1 bell-new">0</span>
+          <!-- Bell dropdown panel -->
+          <div id="bell-dropdown"
+            class="hidden absolute top-full right-0 mt-2 w-80 bg-parchment
+                   border border-warm-200 shadow-lg rounded-sm z-50 max-h-96 overflow-y-auto dd-menu">
+            <div class="px-4 py-2.5 border-b border-warm-100 text-[10px] font-mono text-warm-400 uppercase tracking-widest">
+              任務通知
+            </div>
+            <div id="bell-list">
+              <div class="px-4 py-6 text-center text-xs font-mono text-warm-400">目前沒有進行中的任務</div>
+            </div>
+          </div>
+        </div>
+        <!-- Settings button -->
+        <button id="btn-settings" aria-label="設定"
+          class="flex items-center gap-1.5 border border-warm-200 px-3 py-1.5
+                 text-xs font-mono text-warm-500 hover:border-warm-400 hover:text-ink transition-colors rounded-sm">
+          <span id="key-dot" class="w-1.5 h-1.5 rounded-full bg-amber-400 dot-warn inline-block"></span>
+          <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="12" cy="12" r="3"/>
+            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33
+                     1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33
+                     l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09
+                     A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06A1.65 1.65 0 0 0 9 4.68
+                     a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06
+                     a2 2 0 0 1 2.83 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09
+                     a1.65 1.65 0 0 0-1.51 1z"/>
+          </svg>
+          <span>設定</span>
+        </button>
+      </div>
+    </div>
+  </header>
+
+  <!-- Main content area — 所有 view 在此，flex-1 填滿剩餘 height -->
+  <main class="flex-1 flex flex-col overflow-hidden">
+
+  <!-- ── VIEW: HOME ── 雙欄布局：左中搜尋 + 最近完成、右進行中任務 -->
+  <section id="view-home" class="relative flex-1 overflow-auto">
+
+    <div class="max-w-[1400px] mx-auto px-14 pt-8 pb-12">
+
+      <!-- 頂部 kicker -->
+      <div class="flex items-baseline justify-between mb-3">
+        <span class="home-kicker">Legal Research</span>
+      </div>
+
+      <!-- 大標題 -->
+      <h2 class="home-bigq">
+        <span>查詢</span>　<span class="dim">法律爭點，</span><br>
+        <span class="dim">讓</span> AI <span class="dim">分析判決。</span>
+      </h2>
+
+    <div class="home-layout grid gap-10 lg:grid-cols-[minmax(0,1fr)_360px]">
+
+      <!-- ══ 主欄：搜尋 + 最近完成 ══ -->
+      <div class="home-main">
+
+        <!-- Search domain toggle（設計版 pill）-->
+        <div id="search-domain-toggle" class="mb-3" role="radiogroup" aria-label="搜尋類型">
+          <div class="home-seg">
+            <button data-domain="judgment"
+                    class="search-domain-btn home-seg-btn on"
+                    role="radio" aria-checked="true">
+              法院判決
+            </button>
+            <button data-domain="interpretation"
+                    class="search-domain-btn home-seg-btn"
+                    role="radio" aria-checked="false">
+              憲法解釋
+            </button>
+          </div>
+        </div>
+
+        <!-- Search box（設計版 rounded 8px + ⌘K chip）-->
+        <div class="home-search-box mb-3">
+          <label for="main-search" class="sr-only">搜尋關鍵字</label>
+          <input id="main-search" type="text" placeholder="輸入關鍵字" />
+          <span class="home-search-box-chip" title="按 ⌘K 聚焦搜尋">⌘K</span>
+        </div>
+
+        <!-- Search CTA -->
+        <button id="btn-search" class="home-search-cta mb-3">
+          搜　　尋
+        </button>
+
+        <!-- 進階列 -->
+        <div class="flex items-center justify-between text-xs gap-4 mb-1.5">
+          <div id="home-filter-row" class="flex items-center gap-1.5 font-mono text-warm-400 min-w-0"
+               title="對應司法院「裁判主文」欄位（jud_jmain）— 進階篩選">
+            <label for="main-text-input" class="uppercase tracking-widest text-[10px] shrink-0">主文含</label>
+            <input id="main-text-input" type="text" placeholder="（選填）例：上訴駁回"
+                   class="w-44 bg-transparent border-b border-warm-200 text-xs font-serif text-ink
+                          focus:outline-none focus:border-ink placeholder-warm-300 py-0.5" />
+          </div>
+          <button id="btn-search-help" class="shrink-0 flex items-center gap-1 text-warm-400 hover:text-seal transition-colors ml-auto">
+            <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/>
+            </svg>
+            <span class="font-mono text-[10px]">搜尋說明</span>
+          </button>
+        </div>
+        <input type="checkbox" id="hdr-expand" checked class="hidden" />
+
+        <!-- Restart recovery banner -->
+        <div id="home-restart-banner" class="hidden mt-8"></div>
+
+        <!-- 最近完成 2 筆（搜尋框下方）- 2 欄 grid 與設計版一致 -->
+        <div id="home-recent-section" class="mt-8 hidden">
+          <div class="home-section-header">
+            <span id="home-recent-header-label">最近完成</span>
+            <span class="home-section-header-link" id="home-recent-view-all">查看全部 →</span>
+          </div>
+          <div id="home-recent-list" class="grid grid-cols-2 gap-3.5"></div>
+        </div>
+
+        <!-- Loading state（首次 load tasks 時）-->
+        <div id="home-tasks-loading" class="text-center py-4 text-xs font-mono text-warm-400 mt-8">載入中…</div>
+      </div>
+
+      <!-- ══ 右側欄：進行中任務 live（永遠顯示、設計版 3 格固定 + 虛線空位） ══ -->
+      <aside class="home-aside" id="home-aside">
+        <div class="home-section-header">
+          <span id="home-active-header-label">進行中 · 0 / 3</span>
+        </div>
+        <div id="home-active-list" class="flex flex-col gap-2"></div>
+      </aside>
+
+    </div>
+
+    </div><!-- /padding wrapper -->
+
+  </section><!-- /view-home -->
+
+  <!-- ── VIEW: HISTORY ── 歷史搜尋 -->
+  <section id="view-history" class="hidden relative flex-1 overflow-auto">
+    <div class="max-w-[1400px] mx-auto px-12 pt-8 pb-16">
+
+      <!-- Page header: 標題 + 副 count -->
+      <div class="history-page-header">
+        <h2 class="history-page-title">歷史搜尋</h2>
+        <span class="history-page-count" id="history-page-count">共 0 筆</span>
+      </div>
+
+      <!-- Toolbar: 狀態 tabs（左）+ 類型（右）-->
+      <div class="flex flex-wrap items-center justify-between gap-4 pb-4 border-b border-[color:var(--d-line-2)] mb-6">
+        <div class="flex items-center gap-2 flex-wrap" role="tablist" aria-label="狀態篩選">
+          <button class="history-tab history-tab-active" data-hfilter="all" role="tab">
+            全部 <span class="history-tab-count" data-count="all">0</span>
+          </button>
+          <button class="history-tab" data-hfilter="active" role="tab">
+            進行中 <span class="history-tab-count" data-count="active">0</span>
+          </button>
+          <button class="history-tab" data-hfilter="completed" role="tab">
+            已完成 <span class="history-tab-count" data-count="completed">0</span>
+          </button>
+        </div>
+        <div class="flex items-center gap-4 text-xs font-mono text-warm-500">
+          <div class="flex items-center gap-2">
+            <span>類型：</span>
+            <button class="history-type history-type-active" data-htype="all">全部</button>
+            <span class="text-warm-300">·</span>
+            <button class="history-type" data-htype="interpretation">釋</button>
+            <span class="text-warm-300">·</span>
+            <button class="history-type" data-htype="judgment">判</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 3 欄卡片 grid -->
+      <div id="history-grid"
+           class="grid gap-4 md:grid-cols-2 xl:grid-cols-3 pb-8" aria-live="polite"></div>
+
+      <!-- Empty state -->
+      <div id="history-empty" class="hidden text-center py-16">
+        <p class="text-warm-400 text-sm font-serif">沒有符合條件的任務</p>
+      </div>
+
+      <!-- Infinite scroll sentinel -->
+      <div id="history-scroll-sentinel" class="h-10"></div>
+    </div>
+  </section>
+
+  </main><!-- /main 結束 — overlays 在 main 外（fixed 不受影響）-->
+
+  <!-- ── SEARCH CARD OVERLAY ── -->
+  <div id="search-card-backdrop" class="hidden fixed inset-0 z-[40]"
+       style="background:rgba(0,0,0,.5);backdrop-filter:blur(3px)"></div>
+
+  <div id="search-card" class="hidden fixed inset-0 z-[50] flex items-start justify-center pointer-events-none"
+       role="dialog" aria-modal="true" aria-label="搜尋篩選與分析" style="padding-top:40px">
+    <div id="search-card-inner"
+         class="pointer-events-auto bg-parchment border border-warm-200 flex flex-col fade-in"
+         style="width:680px;max-height:85vh;box-shadow:0 8px 40px rgba(0,0,0,.18);border-radius:8px;overflow:hidden">
+
+      <!-- Card header (shared across states) -->
+      <div class="shrink-0">
+        <div class="flex items-center gap-4 px-5 py-3.5 border-b border-warm-200">
+          <h2 id="card-header-text" class="font-serif text-base text-ink font-normal shrink-0"></h2>
+          <!-- State C: 關鍵字 chip 放在 header 中段，節省側欄空間；其他 state 時隱藏 -->
+          <div id="card-header-keyword-chip"
+               class="hidden min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1"></div>
+          <div class="flex items-center gap-3 shrink-0 ml-auto">
+            <!-- State C: 分析統計（已分析 N 筆 · N 命中）；其他 state 時 hidden -->
+            <span id="card-header-stats" class="hidden text-xs font-mono text-warm-500"></span>
+            <button id="card-delete-task" aria-label="刪除任務" title="刪除此搜尋任務"
+              class="text-warm-400 hover:text-red-500 transition-colors w-7 h-7 flex items-center justify-center rounded-sm">
+              <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6"/>
+                <path d="M10 11v6M14 11v6"/><path d="M9 6V4h6v2"/>
+              </svg>
+            </button>
+            <button id="card-close" aria-label="關閉"
+              class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <!-- Stage 1 搜尋進度條（不定長動畫） -->
+        <div id="card-search-bar" class="hidden h-1 bg-warm-200 overflow-hidden">
+          <div class="h-full bg-seal progress-running" style="width:100%"></div>
+        </div>
+      </div>
+
+      <!-- ─── State A: Narrow + AI 分析指令 ─── -->
+      <div id="card-state-a" class="hidden flex-1 overflow-y-auto">
+
+        <!-- Row 1: 關鍵字 (left, flex-1) + 主文含 (right, fixed 180px) 同水平 -->
+        <div class="px-5 pt-4 pb-2 flex gap-5">
+          <!-- Left: Keyword chips + 僅比對判決理由 -->
+          <div class="flex-1 min-w-0">
+            <div class="text-[10px] font-mono text-warm-400 uppercase tracking-widest mb-2">關鍵字</div>
+            <div class="flex flex-wrap gap-x-2 gap-y-1.5 items-center">
+              <div id="card-keyword-chip" class="contents"></div>
+              <button id="card-reasoning-toggle"
+                class="flex items-center gap-1 px-2 py-0.5 rounded-sm border text-xs transition-colors
+                       border-warm-200 text-warm-500 hover:border-seal hover:text-seal"
+                data-active="false">
+                <span class="font-serif">僅比對判決理由</span>
+              </button>
+            </div>
+            <div id="card-reasoning-status" class="hidden text-[11px] font-mono text-warm-400 mt-1.5"></div>
+          </div>
+          <!-- Right: 主文含 filter -->
+          <div class="w-[180px] shrink-0">
+            <label for="card-main-text" class="text-[10px] font-mono text-warm-400 uppercase tracking-widest mb-2 block">主文含</label>
+            <div class="flex items-center gap-1">
+              <input id="card-main-text" type="text" placeholder="例：撤銷原處分"
+                class="flex-1 min-w-0 border-b border-warm-200 focus:border-ink bg-transparent
+                       text-xs font-serif text-ink placeholder-warm-400 outline-none py-0.5 transition-colors" />
+              <span id="card-main-text-current" class="hidden text-[10px] font-mono text-seal"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Row 2: 法院層級 (left, flex-1) + 年度 (right, fixed 180px) 同水平 -->
+        <div class="px-5 pt-2 pb-3 flex gap-5">
+          <!-- Left: Court tiers -->
+          <div class="flex-1 min-w-0">
+            <div class="text-[10px] font-mono text-warm-400 uppercase tracking-widest mb-2">法院層級</div>
+            <div id="card-tier-filters" class="flex flex-wrap gap-x-2 gap-y-1.5"></div>
+          </div>
+          <!-- Right: Year slider（interpretation mode 會整塊隱藏，因為 cons 資料 stage 1 階段不帶 date）-->
+          <div id="card-year-column" class="w-[180px] shrink-0">
+            <div class="flex items-center justify-between mb-1.5">
+              <span class="text-[10px] font-mono text-warm-400 uppercase tracking-widest">年度</span>
+              <span id="card-year-label" class="text-[10px] font-mono text-ink"></span>
+            </div>
+            <div id="card-year-slider-wrap" class="relative h-5">
+              <div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1 bg-warm-200 rounded-full">
+                <div id="card-year-track" class="absolute h-full bg-seal/30 rounded-full"></div>
+              </div>
+              <input type="range" id="card-year-from" class="absolute inset-0 w-full appearance-none bg-transparent pointer-events-none range-thumb" />
+              <input type="range" id="card-year-to"   class="absolute inset-0 w-full appearance-none bg-transparent pointer-events-none range-thumb" />
+            </div>
+            <div class="flex justify-between text-[10px] font-mono text-warm-400 mt-0.5">
+              <span id="card-year-min"></span><span id="card-year-max"></span>
+            </div>
+          </div>
+        </div>
+
+        <!-- Filtered count -->
+        <div class="px-5 py-2 border-t border-warm-100 flex items-baseline justify-between">
+          <span class="text-xs font-mono text-warm-500">
+            已限縮範圍至 <span id="card-filtered-count" class="text-ink font-medium">—</span> 筆
+          </span>
+          <span id="card-cost-mini" class="text-[11px] font-mono text-warm-400"></span>
+        </div>
+
+        <!-- 2-item hit preview with fade -->
+        <div id="card-hit-preview-wrap" class="relative px-5 pt-2 pb-2">
+          <div id="card-hit-preview"></div>
+          <div class="hit-preview-fade pointer-events-none" style="height:32px;margin-top:-32px;position:relative"></div>
+        </div>
+
+        <!-- Divider -->
+        <div class="border-t border-warm-200"></div>
+
+        <!-- NL question textarea -->
+        <div class="px-5 pt-4 pb-3">
+          <label class="block text-[10px] font-mono text-warm-400 uppercase tracking-widest mb-2">AI 分析指令</label>
+          <textarea id="card-question" rows="3"
+            placeholder="描述你要找的法律論點..."
+            class="w-full border border-warm-300 focus:border-ink bg-white px-3 py-2.5
+                   text-sm font-serif text-ink resize-none outline-none transition-colors
+                   leading-relaxed placeholder-warm-300"
+            style="box-shadow:0 0 0 1.5px #E3E3E1,0 2px 6px rgba(0,0,0,.03)"></textarea>
+        </div>
+
+        <!-- Read facts toggle + cost estimate -->
+        <div class="px-5 pb-3 flex items-center justify-between">
+          <label class="flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" id="card-read-facts" class="cursor-pointer accent-seal" />
+            <span class="text-xs font-mono text-warm-500">同時分析事實</span>
+          </label>
+          <span id="card-cost-hint" class="text-[11px] font-mono text-warm-400">
+            估 <span id="card-cost-tokens" class="text-ink">—</span> tokens
+            · 約 <span id="card-cost-time" class="text-ink">—</span>
+          </span>
+        </div>
+
+        <!-- Submit button -->
+        <div class="px-5 pb-5">
+          <button id="card-submit-analyze"
+            class="w-full bg-ink hover:bg-warm-500 text-parchment py-3 text-sm font-mono tracking-widest transition-colors">
+            AI　分　析
+          </button>
+        </div>
+      </div><!-- /card-state-a -->
+
+      <!-- ─── State B: Progress ─── -->
+      <div id="card-state-b" class="hidden flex-1 flex flex-col px-7 py-6" aria-live="polite">
+        <!-- Question reminder（設計版大 serif italic）-->
+        <p id="card-progress-question" class="progress-question-b"></p>
+
+        <!-- Progress info -->
+        <div class="flex flex-col gap-3">
+          <!-- Stage label (置中 + 粗體；顯示 N/M 在同一行) -->
+          <p id="card-progress-label" class="progress-label-b">準備中...</p>
+          <!-- Progress bar（設計版粗、pill 圓角） -->
+          <div class="progress-bar-b">
+            <div id="card-progress-fill" class="progress-fill-b" style="width:0%"></div>
+          </div>
+          <!-- Estimated remaining / tokens ticker 會插在 progress-label parent 內 -->
+          <p id="card-progress-eta" class="progress-eta-b"></p>
+        </div>
+
+        <!-- 即時活動 feed — 每筆 Claude 回傳立刻顯示（row 內 dot/score 顏色保留）-->
+        <div class="flex-1 mt-5 flex flex-col min-h-0">
+          <div class="flex items-center justify-between mb-2 pb-2 border-b border-[color:var(--d-line-2)]">
+            <span class="text-[10.5px] font-mono text-warm-500">即時回傳 <span id="card-live-count" class="text-[color:var(--d-accent-ink)] font-medium">0</span> 筆</span>
+            <span id="card-live-last-time" class="text-[10.5px] font-mono text-warm-400"></span>
+            <span id="card-live-ago" class="text-[10.5px] font-mono text-warm-400"></span>
+          </div>
+          <div id="card-live-feed" class="flex-1 overflow-y-auto pt-1 space-y-1.5" style="max-height:260px"></div>
+        </div>
+
+        <!-- Abort button（設計版紅框 + 淡紅底）-->
+        <button id="card-abort-analyze" class="progress-abort-b">
+          中止分析（已完成的結果會保留）
+        </button>
+
+        <!-- Hint -->
+        <p class="mt-2 text-[11px] text-warm-400 font-serif italic text-center leading-relaxed">
+          可暫時關閉此畫面，完成後會在右上角鈴鐺提示。若 Claude 回應較慢，系統會自動重試。
+        </p>
+      </div><!-- /card-state-b -->
+
+      <!-- ─── State C: Results (two-column layout) ─── -->
+      <div id="card-state-c" class="hidden flex-1 flex flex-col md:flex-row" style="min-height:0">
+
+        <!-- Left column: 題綱 / synthesis（ai tint bg、設計版）— 關鍵字已移到 header -->
+        <div class="result-left-col shrink-0 overflow-y-auto px-5 py-5 flex flex-col gap-5
+                    w-full md:w-[32%] max-md:max-h-[40vh] max-md:border-b">
+
+          <!-- Analysis history tabs -->
+          <div id="card-analysis-tabs" class="hidden flex flex-wrap gap-1.5"></div>
+
+          <!-- 題綱（question + 分析範圍 meta）-->
+          <div>
+            <div class="result-kicker mb-2">題綱</div>
+            <p id="card-results-question" class="result-question"></p>
+            <div id="card-results-scope" class="result-scope mt-2"></div>
+          </div>
+
+          <!-- 追問輸入框（設計版藍 CTA）-->
+          <div>
+            <div class="result-followup">
+              <input id="card-followup-input" type="text" placeholder="換個角度追問，或輸入新問題…"
+                     class="result-followup-input" />
+              <button id="card-followup-submit" class="result-followup-submit" disabled>
+                快速分析
+              </button>
+            </div>
+            <div id="card-followup-mode" class="text-[10px] font-mono text-warm-400 hidden mt-1.5"></div>
+          </div>
+
+          <!-- AI 綜合彙整 -->
+          <div id="card-synthesis" class="result-synthesis">
+            <div class="flex items-baseline gap-3 mb-3">
+              <span class="result-synthesis-title">AI 綜合彙整</span>
+              <span id="card-synth-consensus" class="result-synthesis-consensus"></span>
+            </div>
+            <p id="card-synth-summary" class="result-synthesis-body"></p>
+          </div>
+        </div>
+
+        <!-- Right column: clusters + results -->
+        <div class="flex-1 flex flex-col" style="min-height:0">
+
+          <!-- Fixed header: cluster tabs + sort -->
+          <div class="shrink-0 px-5 pt-5 pb-3">
+            <!-- 智慧分類 title + cluster tabs -->
+            <div id="card-cluster-section">
+              <div class="flex items-baseline justify-between mb-2.5">
+                <span class="result-kicker">智慧分類</span>
+              </div>
+              <div id="card-cluster-tabs" class="flex flex-wrap gap-2 mb-4"></div>
+            </div>
+
+            <!-- Results count + sort toggle -->
+            <div class="flex items-baseline justify-between border-t border-[color:var(--d-line-2)] pt-3">
+              <span id="card-results-count" class="text-xs font-mono text-warm-500"></span>
+              <div class="flex gap-3 text-xs font-mono">
+                <button id="card-sort-score" class="result-sort-btn result-sort-active cursor-pointer">推薦排序</button>
+                <button id="card-sort-date" class="result-sort-btn cursor-pointer">時間排序</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Scrollable results list -->
+          <div class="flex-1 overflow-y-auto" style="min-height:0">
+            <div id="card-results-list" class="px-5 pb-2"></div>
+
+            <div id="card-load-more-wrap" class="hidden px-5 pb-5 text-center">
+              <button id="card-load-more" class="text-xs font-mono text-seal hover:underline transition-colors">
+                載入更多...
+              </button>
+            </div>
+
+            <div id="card-results-empty" class="hidden px-5 py-12 text-center">
+              <p class="text-warm-400 font-mono text-xs">沒有符合條件的相關判決</p>
+            </div>
+          </div>
+        </div>
+
+      </div><!-- /card-state-c -->
+
+    </div><!-- /search-card-inner -->
+  </div><!-- /search-card -->
+
+  <!-- ── JUDGMENT READER CARD ── -->
+  <div id="reader-card-backdrop" class="hidden fixed inset-0 z-[40]"
+       style="background:rgba(0,0,0,.55);backdrop-filter:blur(3px)"></div>
+
+  <div id="reader-card" class="hidden fixed inset-0 z-[50] flex items-start justify-center pointer-events-none"
+       role="dialog" aria-modal="true" aria-label="判決閱讀器" style="padding-top:40px">
+    <div id="reader-card-inner"
+         class="pointer-events-auto bg-parchment border border-warm-200 flex flex-col fade-in relative"
+         style="width:90vw;max-width:1400px;height:90vh;box-shadow:0 8px 40px rgba(0,0,0,.18);border-radius:8px;overflow:hidden">
+
+      <!-- Header: structured metadata block（sticky — 只是 reader-card 內 flex top 的固定位置）-->
+      <!-- py-2.5：兩行 meta 使本 header 自然高於分析卡 header；減少 padding 讓兩者視覺接近 -->
+      <div class="shrink-0 border-b border-warm-200 px-5 py-2.5 relative">
+        <!-- Grid 三欄固定：1fr | pill | 1fr — 左右兩側等寬、pill 永遠在幾何中心，
+             不隨左欄字號長短跳動。narrow 螢幕下 pill 隱藏（col 2 auto→0），仍為 3 欄
+             grid（視覺等同 justify-between）。pill fallback 內容在 rc-meta 內的 row 顯示 -->
+        <div class="grid items-start gap-3 grid-cols-[1fr_auto_1fr]">
+          <div class="col-start-1 flex items-start gap-3 min-w-0 justify-self-start">
+            <button id="rc-star" aria-label="標記" title="標記此判決"
+              class="shrink-0 mt-0.5 text-warm-400 hover:text-amber-500 transition-colors">
+              <svg xmlns="http://www.w3.org/2000/svg" width="20" height="20" viewBox="0 0 24 24"
+                   fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polygon points="12 2 15.09 8.26 22 9.27 17 14.14 18.18 21.02 12 17.77 5.82 21.02 7 14.14 2 9.27 8.91 8.26 12 2"/>
+              </svg>
+            </button>
+            <div id="rc-meta" class="flex flex-col gap-1 text-sm font-serif min-w-0"></div>
+          </div>
+          <!-- 案由 pill — col 2 auto 寬；< 1024px 隱藏、由 rc-meta 內 row 顯示 -->
+          <div class="col-start-2 hidden lg:flex self-center items-center">
+            <span id="rc-cause-pill"
+              class="hidden font-serif text-xs text-seal bg-seal/10 border border-seal/30 px-2.5 py-0.5 rounded-full max-w-[220px] truncate"
+              title=""></span>
+          </div>
+          <div class="col-start-3 flex items-center gap-1 shrink-0 justify-self-end">
+            <!-- Prev/Next 判決 -->
+            <button id="rc-prev" aria-label="上一篇判決 (K)" title="上一篇 (K)"
+              class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm disabled:opacity-30 disabled:cursor-not-allowed">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="15 18 9 12 15 6"/>
+              </svg>
+            </button>
+            <button id="rc-next" aria-label="下一篇判決 (J)" title="下一篇 (J)"
+              class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm disabled:opacity-30 disabled:cursor-not-allowed">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <polyline points="9 18 15 12 9 6"/>
+              </svg>
+            </button>
+            <span class="w-px h-5 bg-warm-200 mx-1"></span>
+            <!-- 字型大小切換 -->
+            <button id="rc-font-smaller" aria-label="縮小字型" title="縮小字型"
+              class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm text-[11px] font-serif font-semibold">
+              A<span class="text-[8px] -ml-px">−</span>
+            </button>
+            <button id="rc-font-larger" aria-label="放大字型" title="放大字型"
+              class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm text-[14px] font-serif font-semibold">
+              A<span class="text-[9px] -ml-px">+</span>
+            </button>
+            <span class="w-px h-5 bg-warm-200 mx-1"></span>
+            <button id="rc-download-pdf" aria-label="下載 PDF" title="下載 PDF"
+              class="text-warm-400 hover:text-seal transition-colors w-7 h-7 flex items-center justify-center rounded-sm">
+              <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>
+              </svg>
+            </button>
+            <button id="rc-close" aria-label="關閉 (Esc)" title="關閉 (Esc)"
+              class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm">
+              <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+              </svg>
+            </button>
+          </div>
+        </div>
+        <!-- 閱讀進度條 — 頭部底緣的細線，隨內文捲動填充 -->
+        <div class="absolute left-0 right-0 h-0.5 bg-transparent" style="bottom:-1px">
+          <div id="rc-progress" class="h-full bg-seal transition-[width] duration-150 ease-out" style="width:0%"></div>
+        </div>
+      </div>
+
+      <!-- 返回分析列表（原為側欄收合 chevron，2026-04-19 改為 back button）
+           chevron ◁ 代表「回上一層 = 回分析列表」 -->
+      <button id="rc-sidebar-toggle" aria-label="返回分析列表" title="返回分析列表"
+        class="rc-sidebar-toggle-btn"
+        data-collapsed="false">
+        <svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
+          <polyline points="15 18 9 12 15 6"/>
+        </svg>
+      </button>
+
+      <!-- Reader tab bar：判決本文 ↔ 歷史分析（跨 task case-level 聚合） -->
+      <div class="shrink-0 border-b border-warm-200 px-5 flex items-center gap-1 text-sm font-serif">
+        <button class="rc-tab rc-tab-content active py-2.5 px-3 border-b-2 border-ink text-ink transition-colors"
+                data-rc-tab="content">判決本文</button>
+        <button class="rc-tab rc-tab-history py-2.5 px-3 border-b-2 border-transparent text-warm-400 hover:text-ink transition-colors"
+                data-rc-tab="history">
+          歷史分析 <span id="rc-history-count" class="text-[11px] font-mono text-warm-400 ml-0.5">(0)</span>
+        </button>
+      </div>
+
+      <!-- Two-column body（判決本文 tab） -->
+      <!-- reader-2col-grid：左米色 outline / 右近白內文，寬度 CSS 變數控制以便收合動畫 -->
+      <div id="rc-content-panel" class="flex-1 flex reader-2col-grid" style="min-height:0">
+
+        <!-- Left: Outline —— 米色底、可收合 -->
+        <div id="rc-outline" class="rc-outline shrink-0 border-r border-warm-200 overflow-y-auto px-4 py-4">
+          <div class="rc-outline-kicker mb-3">判決架構</div>
+          <div id="rc-outline-list" class="flex flex-col gap-0.5"></div>
+        </div>
+
+        <!-- Right: Content (no tabs, always combined view) —— 近白底 -->
+        <div id="rc-scroll" class="rc-scroll flex-1 overflow-y-auto" style="min-height:0">
+          <div id="rc-text" class="px-10 py-6 relative max-w-[52rem] mx-auto"></div>
+        </div>
+      </div>
+
+      <!-- 歷史分析 panel：跨 task 此 case_id 被分析過的清單 -->
+      <div id="rc-history-panel" class="hidden flex-1 overflow-y-auto" style="min-height:0">
+        <div id="rc-history-list" class="px-10 py-6 max-w-[52rem] mx-auto flex flex-col gap-4"></div>
+      </div>
+
+    </div>
+  </div><!-- /reader-card -->
+
+
+  <!-- Legacy stubs (removed views — hidden divs prevent JS null errors) -->
+  <div class="hidden" aria-hidden="true">
+    <div id="semantic-input-block"><textarea id="view-semantic-input"></textarea><button id="btn-analyze-semantic"></button></div>
+    <div id="view-strategy"><span id="strategy-query-display"></span><div id="strategy-cards"></div><button id="btn-strategy-back"></button><button id="btn-strategy-exec"></button></div>
+  </div>
+
+
+  <!-- Legacy results stubs — JS 仍用 getElementById 寫入這些元素（寫到不可見 DOM），
+       移除會造成 null 錯誤。後續大規模重構時連同 JS 函式一起清除。 -->
+  <div class="hidden" aria-hidden="true">
+    <div id="results-back-btn"></div> <div id="task-dd-btn"></div> <div id="task-dd-label"></div> <div id="task-dd-menu"></div> <div id="task-dd-status"></div> <div id="analysis-tabs"></div> <div id="btn-new-analysis"></div> <div id="view-stage2"></div> <div id="stage2-total"></div> <div id="stage2-task-keyword"></div> <div id="stage2-running-indicator"></div> <div id="btn-stage3-modal"></div> <div id="stage2-tier-filters"></div> <div id="stage2-year-slider-wrap"></div> <div id="stage2-year-from"></div> <div id="stage2-year-to"></div> <div id="stage2-year-fill"></div> <div id="stage2-year-label"></div> <div id="stage2-year-min"></div> <div id="stage2-year-max"></div> <div id="stage2-selected"></div> <div id="stage2-hits-list"></div> <div id="stage2-empty"></div> <div id="btn-stage3-back-to-stage2"></div> <div id="view-stage3"></div> <div id="stage3-keyword-label"></div> <div id="stage3-question-label"></div> <div id="stage3-running-indicator"></div> <div id="stage3-synth-consensus"></div> <div id="stage3-synth-count"></div> <div id="stage3-synth-summary"></div> <div id="stage3-relevant-count"></div> <div id="stage3-relevant-list"></div> <div id="stage3-irrelevant-toggle"></div> <div id="stage3-irrelevant-count"></div> <div id="stage3-irrelevant-chev"></div> <div id="stage3-irrelevant-list"></div> <div id="legacy-results-body"></div> <div id="results-col-headers"></div> <div id="score-dd-wrap"></div> <div id="score-dd-btn"></div> <div id="score-dd-label"></div> <div id="score-dd-menu"></div> <div id="match-dd-wrap"></div> <div id="match-dd-btn"></div> <div id="match-dd-label"></div> <div id="match-dd-menu"></div> <div id="col-secondary"></div> <div id="results-count"></div> <div id="judgment-list"></div> <div id="results-empty"></div> <div id="results-loading"></div> <div id="results-loading-msg"></div> <div id="results-reader-panel"></div> <div id="reader-list-inner"></div> <div id="reader-list-count"></div> <div id="reader-back-list"></div> <div id="reader-content"></div> <div id="reader-summary-body"></div> <div id="reader-score-badge"></div> <div id="reader-analysis-label"></div> <div id="reader-match-badge"></div> <div id="reader-excerpt-full"></div> <div id="reader-reason"></div> <div id="summary-card-toggle"></div> <div id="summary-chevron"></div> <div id="reader-field-tabs"></div> <div id="reader-text"></div> <div id="reader-source-link"></div> <div id="reader-copy-cite"></div> <div id="reader-prev"></div> <div id="reader-next"></div> <div id="reader-qa-thread"></div> <div id="reader-qa-input"></div> <div id="reader-qa-submit"></div> <div id="reader-empty"></div> <div id="reader-loading"></div>
+  </div>
+
+  <!-- ── VIEW: HISTORY ── -->
+  <!-- Task list card overlay (replaces old history view) -->
+  <div id="tasklist-backdrop" class="hidden fixed inset-0 z-[40]"
+       style="background:rgba(0,0,0,.45);backdrop-filter:blur(2px)"></div>
+  <div id="tasklist-card" class="hidden fixed inset-0 z-[50] flex items-start justify-center pointer-events-none"
+       role="dialog" aria-modal="true" aria-label="任務清單" style="padding-top:40px">
+    <div class="pointer-events-auto bg-parchment border border-warm-200 flex flex-col fade-in"
+         style="width:680px;height:75vh;box-shadow:0 8px 40px rgba(0,0,0,.18)">
+      <div class="shrink-0 flex items-center justify-between px-5 py-3.5 border-b border-warm-200">
+        <h2 class="font-serif text-base text-ink">任務清單</h2>
+        <span id="tasklist-count" class="text-xs font-mono text-warm-400 ml-2"></span>
+        <button id="tasklist-close" aria-label="關閉"
+          class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm ml-auto">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Filter buttons -->
+      <div class="shrink-0 flex gap-2 px-5 py-3 border-b border-warm-100">
+        <button class="tasklist-filter" data-filter="active">進行中</button>
+        <button class="tasklist-filter" data-filter="pending">待處理</button>
+        <button class="tasklist-filter" data-filter="completed">已完成</button>
+      </div>
+      <div class="flex-1 overflow-y-auto px-5 py-4">
+        <div id="tasklist-grid" class="grid grid-cols-2 gap-3"></div>
+        <div id="tasklist-empty" class="hidden text-center py-12">
+          <p class="text-warm-400 text-xs font-mono">尚無任務</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+
+<!-- ══════════════════════════════════════════════
+     FOLLOW-UP MODAL (新追問)
+══════════════════════════════════════════════ -->
+<!-- ── SEARCH HELP CARD ── -->
+<div id="search-help-backdrop" class="hidden fixed inset-0 z-[40]"
+     style="background:rgba(0,0,0,.4);backdrop-filter:blur(2px)"></div>
+<div id="search-help-card" class="hidden fixed inset-0 z-[50] flex items-start justify-center pointer-events-none"
+     role="dialog" aria-modal="true" aria-label="搜尋說明" style="padding-top:40px">
+  <div class="pointer-events-auto bg-parchment border border-warm-200 flex flex-col fade-in"
+       style="width:520px;max-height:80vh;box-shadow:0 8px 40px rgba(0,0,0,.18)">
+    <div class="shrink-0 flex items-center justify-between px-5 py-3.5 border-b border-warm-200">
+      <h2 class="font-serif text-base text-ink">搜尋說明</h2>
+      <button id="search-help-close" aria-label="關閉"
+        class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+    <div class="flex-1 overflow-y-auto px-5 py-4 space-y-5 font-serif text-sm text-ink leading-relaxed">
+
+      <!-- 兩種模式簡介 -->
+      <div class="border border-warm-200 bg-warm-50 rounded-sm px-3 py-2.5">
+        <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">兩種模式</div>
+        <p class="mb-1"><strong>法院判決</strong>：各級法院（含最高、高行、地方法院等）的裁判書全文。</p>
+        <p><strong>憲法解釋</strong>：大法官解釋（釋字第 1-813 號）＋ 新制憲法法庭裁判（111 年起憲判字）。</p>
+        <p class="text-warm-500 text-xs mt-1.5">首頁切換器預設「法院判決」。憲法解釋走獨立資料庫（司法院大法官網），不混一般判決。</p>
+      </div>
+
+      <!-- 關鍵字語法（兩模式共通） -->
+      <div>
+        <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">關鍵字語法</div>
+        <p><strong>空格 = AND</strong>（同時包含）<br>
+          例：「損害賠償 因果關係」→ 兩詞都出現</p>
+        <p class="mt-1.5"><strong>｜（全形豎線）或 OR = OR</strong>（擇一）<br>
+          例：「僱傭｜雇用」「言論自由 OR 新聞自由」→ 任一出現即可</p>
+        <p class="mt-1.5"><strong>組合</strong>：「A B | C D」= (A AND B) OR (C AND D)</p>
+      </div>
+
+      <!-- 法院判決模式專屬 -->
+      <div>
+        <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">法院判決：自動展開</div>
+        <p><strong>法條變體</strong>：「民法第179條」自動搜尋「第一百七十九條」「179條」等書寫形式。</p>
+        <p class="mt-1"><strong>法規簡稱</strong>：內建 71 組對照。「消保法第51條」自動擴展為「消費者保護法第51條」。</p>
+        <p class="mt-1"><strong>同義詞庫</strong>：已核准條目自動套用（如「僱傭 ↔ 雇傭」）。設定 → 同義詞庫可管理。</p>
+        <p class="mt-1"><strong>主文篩選</strong>：「主文含」欄位限縮裁判主文內容（例「上訴駁回」「撤銷原處分」）。選填。</p>
+      </div>
+
+      <!-- 憲法解釋模式專屬 -->
+      <div>
+        <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">憲法解釋：子字串比對</div>
+        <p>關鍵字直接在標題、爭點、理由書中做子字串匹配。不做法條變體展開、不用同義詞庫（資料量小、keyword 精準直擊）。</p>
+        <p class="mt-1 text-warm-500 text-xs">資料源：大法官網本機離線索引（868 筆、秒回）。不走司法院裁判書系統。</p>
+      </div>
+
+      <!-- 篩選流程（兩模式共通） -->
+      <div>
+        <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">篩選與分析</div>
+        <p>搜尋完成後進入篩選頁面，可用<strong>法院層級 / 年度範圍 / 案由關鍵字</strong>限縮結果（憲法解釋模式無法院層級、年度 filter）。</p>
+        <p class="mt-1.5"><strong>理由篩選</strong>：勾選「僅保留理由含關鍵字」→ 先抓全文、比對理由段，只分析確實命中的判決，可大幅省 AI 成本。</p>
+        <p class="mt-1.5"><strong>AI 分析</strong>：輸入自然語言問題 → Claude 逐筆評分（0-10）＋ 摘錄原文 ＋ 立場／重點（60 字）＋ 全集綜合摘要。</p>
+      </div>
+
+      <!-- 體驗 -->
+      <div>
+        <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">體驗細節</div>
+        <p><strong>跨任務快取</strong>：同一則判決若曾被其他任務抓過且同 parser 版本、30 天內，不重抓。</p>
+        <p class="mt-1"><strong>任務並行</strong>：最多 5 個任務同時跑（搜尋 / 抓全文 / AI 分析），互不阻塞。</p>
+        <p class="mt-1"><strong>中斷自動重試</strong>：伺服器重啟導致中斷的任務，開啟首頁時自動重試（若有 API key）。</p>
+        <p class="mt-1"><strong>閱讀器</strong>：AI 評價框可點擊跳回對應段落；A/D/J/K 鍵切換上下筆；ESC 關閉。</p>
+      </div>
+
+    </div>
+  </div>
+</div>
+
+<!-- Legacy overlay stubs — JS 仍引用，移除會 null error -->
+<div class="hidden" aria-hidden="true">
+  <div id="followup-overlay"></div> <div id="followup-close"></div> <div id="followup-question"></div> <div id="fu-reasoning"></div> <input type="checkbox" id="fu-main"> <div id="fu-facts"></div> <input type="checkbox" id="fu-fulltext"> <div id="followup-submit"></div> <div id="followup-cancel"></div> <div id="stage3-overlay"></div> <div id="stage3-close"></div> <div id="stage3-question"></div> <div id="stage3-read-facts"></div> <div id="stage3-cost-count"></div> <div id="stage3-cost-tokens"></div> <div id="stage3-cost-time"></div> <div id="stage3-cancel"></div> <div id="stage3-submit"></div> <div id="expand-overlay"></div> <div id="expand-close"></div> <div id="expand-content"></div> <div id="expand-cancel"></div> <div id="expand-skip"></div> <div id="expand-confirm"></div> <textarea id="semantic-search"></textarea>
+</div>
+
+
+<!-- ══════════════════════════════════════════════
+     SETTINGS DRAWER
+══════════════════════════════════════════════ -->
+<div id="settings-backdrop"
+  class="hidden fixed inset-0 z-[60]"
+  style="background:rgba(0,0,0,.6);backdrop-filter:blur(3px)">
+</div>
+
+<aside id="settings-drawer"
+  class="fixed top-0 right-0 bottom-0 z-[70] w-[520px] bg-parchment border-l border-warm-200 flex flex-col"
+  style="box-shadow:-4px 0 24px rgba(0,0,0,.12);transform:translateX(100%);transition:transform .28s cubic-bezier(.16,1,.3,1)"
+  role="dialog" aria-modal="true" aria-label="設定">
+
+  <!-- Header -->
+  <div class="flex items-center justify-between px-6 py-4 border-b border-warm-200 shrink-0">
+    <span class="font-serif text-base font-semibold text-ink">設定</span>
+    <button id="settings-close" aria-label="關閉設定"
+      class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center">
+      <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+           stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+        <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+      </svg>
+    </button>
+  </div>
+
+  <!-- Tab bar -->
+  <div class="flex border-b border-warm-200 shrink-0 px-2">
+    <button class="settings-tab active px-4 py-3 text-xs font-mono" data-tab="api-key">API 金鑰</button>
+    <button class="settings-tab px-4 py-3 text-xs font-mono" data-tab="synonyms">同義詞庫</button>
+    <!-- law-abbrev tab removed — merged into synonym dictionary -->
+    <button class="settings-tab px-4 py-3 text-xs font-mono" data-tab="cache">資料管理</button>
+  </div>
+
+  <!-- Tab panels -->
+  <div class="flex-1 overflow-y-auto">
+
+    <!-- ── API 金鑰 ── -->
+    <div id="settings-tab-api-key" class="settings-panel p-6 space-y-5">
+      <div>
+        <label class="block text-xs font-mono text-warm-400 uppercase tracking-widest mb-2">
+          Anthropic API Key
+        </label>
+        <div class="flex border border-warm-300 focus-within:border-ink transition-colors">
+          <input id="key-input" type="password" placeholder="sk-ant-..."
+            class="flex-1 bg-transparent px-3 py-2 text-sm font-mono text-ink placeholder-warm-300 outline-none min-w-0" />
+          <button id="key-toggle-vis" aria-label="顯示/隱藏 API 金鑰"
+            class="px-3 text-warm-400 hover:text-ink transition-colors border-l border-warm-200 shrink-0">
+            <svg xmlns="http://www.w3.org/2000/svg" width="15" height="15" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7z"/><circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+        </div>
+        <p class="text-warm-400 text-xs font-serif mt-2 leading-relaxed">
+          金鑰僅儲存於瀏覽器本機（localStorage），不會傳送至任何第三方。
+        </p>
+      </div>
+      <!-- 綁定狀態顯示 -->
+      <div id="key-current" class="hidden border border-emerald-200 bg-emerald-50 rounded-sm px-4 py-3">
+        <div class="flex items-center gap-2 mb-1">
+          <span class="w-2 h-2 rounded-full bg-emerald-500 shrink-0"></span>
+          <span class="text-xs font-mono text-emerald-700 font-medium">已綁定</span>
+        </div>
+        <span id="key-masked" class="text-xs font-mono text-emerald-600 tracking-wide"></span>
+      </div>
+      <div id="key-empty" class="hidden border border-amber-200 bg-amber-50 rounded-sm px-4 py-3">
+        <div class="flex items-center gap-2">
+          <span class="w-2 h-2 rounded-full bg-amber-400 shrink-0"></span>
+          <span class="text-xs font-mono text-amber-700">尚未設定 API Key</span>
+        </div>
+      </div>
+      <div class="flex items-center justify-between">
+        <button id="key-clear-btn" class="text-xs font-mono text-warm-400 hover:text-red-500 transition-colors">清除</button>
+        <button id="key-save-btn" class="text-xs font-mono bg-seal text-white px-4 py-1.5 hover:bg-seal-dim transition-colors rounded-sm">
+          儲存金鑰
+        </button>
+      </div>
+    </div>
+
+    <!-- ── 同義詞庫 ── -->
+    <div id="settings-tab-synonyms" class="settings-panel hidden">
+      <div class="px-6 py-4 border-b border-warm-100 flex items-center gap-3">
+        <input id="syn-search" type="text" placeholder="搜尋關鍵字…"
+          class="flex-1 border-b border-warm-200 focus:border-ink bg-transparent text-xs font-mono
+                 text-ink placeholder-warm-300 outline-none py-1 transition-colors" />
+        <button id="syn-reload" aria-label="重新載入" class="text-warm-400 hover:text-ink transition-colors">
+          <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+               stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <polyline points="1 4 1 10 7 10"/>
+            <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+          </svg>
+        </button>
+      </div>
+      <!-- 手動新增 + 匯入匯出 -->
+      <div class="px-6 py-4 border-b border-warm-100">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-[10px] font-mono text-warm-400 uppercase tracking-widest">手動新增</span>
+          <div class="flex gap-2">
+            <button id="syn-export" class="text-[10px] font-mono text-warm-400 hover:text-seal transition-colors">匯出</button>
+            <label class="text-[10px] font-mono text-warm-400 hover:text-seal transition-colors cursor-pointer">
+              匯入
+              <input id="syn-import" type="file" accept=".json" class="hidden" />
+            </label>
+          </div>
+        </div>
+        <div class="flex gap-2">
+          <input id="syn-add-canonical" type="text" placeholder="原詞（例：僱傭）"
+            class="flex-1 border-b border-warm-200 focus:border-ink bg-transparent text-xs font-mono
+                   text-ink placeholder-warm-300 outline-none py-1 transition-colors" />
+          <input id="syn-add-variant" type="text" placeholder="同義詞（例：雇傭）"
+            class="flex-1 border-b border-warm-200 focus:border-ink bg-transparent text-xs font-mono
+                   text-ink placeholder-warm-300 outline-none py-1 transition-colors" />
+          <button id="syn-add-btn"
+            class="shrink-0 text-xs font-mono bg-seal text-white px-3 py-1 hover:bg-seal-dim transition-colors rounded-sm">
+            新增
+          </button>
+        </div>
+      </div>
+      <!-- 待確認 section -->
+      <div id="syn-pending-section" class="hidden">
+        <div class="px-6 pt-4 pb-2">
+          <span class="text-[10px] font-mono text-seal uppercase tracking-widest">待確認</span>
+          <span id="syn-pending-count" class="text-[10px] font-mono text-warm-400 ml-1"></span>
+        </div>
+        <div id="syn-pending-list" class="divide-y divide-warm-100 px-6"></div>
+      </div>
+      <!-- 已核准 section -->
+      <div id="syn-confirmed-section">
+        <div class="px-6 pt-4 pb-2">
+          <span class="text-[10px] font-mono text-emerald-600 uppercase tracking-widest">已核准詞庫</span>
+          <span id="syn-confirmed-count" class="text-[10px] font-mono text-warm-400 ml-1"></span>
+        </div>
+        <div id="syn-confirmed-list" class="divide-y divide-warm-100 px-6 pb-4"></div>
+      </div>
+    </div>
+
+    <!-- ── 資料管理 ── -->
+    <div id="settings-tab-cache" class="settings-panel hidden p-6 space-y-6">
+
+      <!-- MCP 快取區塊 -->
+      <div>
+        <div class="flex items-center justify-between mb-3">
+          <div>
+            <p class="font-serif text-sm font-semibold text-ink">MCP 判決快取</p>
+            <p class="text-xs text-warm-400 font-serif mt-0.5">司法院全文抓取結果，TTL 7 天。快取過多時清除可釋放磁碟空間。</p>
+          </div>
+          <button id="cache-refresh-stats" aria-label="重新整理統計" class="text-warm-400 hover:text-ink transition-colors">
+            <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <polyline points="1 4 1 10 7 10"/>
+              <path d="M3.51 15a9 9 0 1 0 .49-3.5"/>
+            </svg>
+          </button>
+        </div>
+
+        <!-- 統計卡片 -->
+        <div id="cache-stats" class="bg-warm-50 border border-warm-200 px-4 py-3 mb-4 space-y-2">
+          <p class="text-xs font-mono text-warm-400">載入中…</p>
+        </div>
+
+        <!-- 操作按鈕 -->
+        <div class="flex gap-3">
+          <button id="btn-clear-expired"
+            class="flex-1 text-xs font-mono border border-warm-300 text-warm-600 px-4 py-2
+                   hover:border-warm-500 hover:text-ink transition-colors">
+            清除過期快取
+          </button>
+          <button id="btn-clear-all-cache"
+            class="flex-1 text-xs font-mono border border-red-300 text-red-600 px-4 py-2
+                   hover:bg-red-50 transition-colors">
+            清除全部快取
+          </button>
+        </div>
+        <p id="cache-action-msg" class="text-xs font-mono text-warm-400 mt-2 hidden"></p>
+      </div>
+
+    </div>
+
+    <!-- law-abbrev stubs — JS 仍引用 law-search/reload/list -->
+    <div class="hidden">
+      <input id="law-search" /><button id="law-reload"></button><div id="law-list"></div>
+    </div>
+
+  </div>
+</aside>
+
+<!-- API KEY MODAL removed — moved into Settings drawer -->
+
+
+<!-- ══════════════════════════════════════════════
+     JAVASCRIPT
+══════════════════════════════════════════════ -->
+<script src="js/core.js"></script>
+<script src="js/app.js"></script>
+<script src="js/init.js"></script>
+</body>
+</html>

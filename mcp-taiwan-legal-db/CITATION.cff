@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+title: "mcp-taiwan-legal-db: Taiwan Legal Database MCP Server"
+message: "If you use this dataset in research, please cite it using the metadata from this file."
+type: dataset
+authors:
+  - name: LawChat
+    email: opensource@lawchat.com.tw
+    website: https://lawchat.com.tw
+repository-code: https://github.com/lawchat-oss/mcp-taiwan-legal-db
+abstract: >-
+  MCP server for Taiwan legal data: judicial judgments, national regulations
+  (11,700+ statutes), and 868 Constitutional Court rulings (Grand Justices'
+  Interpretations + Constitutional Court Judgments) with full reasoning text,
+  citation graph extraction, and offline-first access.
+keywords:
+  - taiwan
+  - legal data
+  - constitutional law
+  - judicial yuan
+  - citation graph
+  - mcp
+  - traditional chinese
+  - open data
+license: CC0-1.0
+version: 1.1.0
+date-released: "2026-04-16"

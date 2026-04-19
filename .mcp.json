@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "mcp-taiwan-legal-db": {
+      "command": ".venv/bin/python",
+      "args": ["-m", "mcp_server.server"],
+      "cwd": "mcp-taiwan-legal-db",
+      "env": {}
+    }
+  }
+}
