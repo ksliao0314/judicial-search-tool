@@ -191,7 +191,9 @@ WorkItem = (
 
 
 # Stage 1 hard cap：超過此數律師應回頭加條件再搜，不該硬塞整個資料庫
-STAGE1_HARD_CAP = 3000
+# 5000 考量：Claude 總成本控制（~US$80 上限 worst case）、Stage 2.5 fetch 時間
+# （60 req/min MCP bucket、5000 筆要 ~80 分鐘）、司法院 WAF 容忍度（連續 ~10 rounds MCP 搜尋）
+STAGE1_HARD_CAP = 5000
 
 
 # ---------------------------------------------------------------------------

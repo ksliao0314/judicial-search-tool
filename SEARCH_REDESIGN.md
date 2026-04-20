@@ -25,7 +25,7 @@
 - 智慧展開 toggle（保留現有 citation/synonym 展開行為）
 
 後端動作：
-- MCP `search_judgments` **預設窮盡**（hard cap 3000，超過顯示「3000+ 已截斷，請加條件再搜」）
+- MCP `search_judgments` **預設窮盡**（hard cap 5000，超過顯示「5000+ 已截斷，請加條件再搜」）
 - **不傳** court / case_type / year_from / year_to 給 MCP（這些篩選改在 stage 2 做）
 - 結果寫入新表 `task_search_hits`（只存 metadata，無全文）
 
@@ -335,7 +335,7 @@ class Stage3AnalyzeWork:
 2. **Stage 2 篩選狀態持久化**：目前純前端 state，重整頁面消失。律師很想要再加。
 3. **Stage 1 cache**：同 keyword 短時間內重搜要不要 cache hits？暫無，依 MCP 自身 cache（24 小時）。
 4. **Stage 3 narrow 比對**：先做完整重跑，不檢查「上次精讀的 narrow + 這次的差集」優化。
-5. **MCP cap 超過時的 UX**：3000+ 截斷的明確訊息與「我接受截斷」按鈕，第一版用 alert 即可。
+5. **MCP cap 超過時的 UX**：5000+ 截斷的明確訊息與「我接受截斷」按鈕，第一版用 alert 即可。
 
 ---
 
