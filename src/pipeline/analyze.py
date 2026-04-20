@@ -16,8 +16,23 @@ from typing import Any
 import anthropic
 
 from src.db import database as db
+from src.pipeline.cons_normalizer import is_old_interpretation
 from src.utils.json_parse import extract_json
 from src.utils.rate_limiter import TokenBucket, estimate_prompt_tokens
+
+# 舊制釋字結構解析 — 只用於 _get_field_text 的 reasoning 過濾路徑；對新制憲判字 / 一般
+# 判決完全不動。Parser 自 mcp fork import（shared library 模式、避免重複維護）。
+# Path manipulation：iCloud UF_HIDDEN 讓 editable .pth 被 skip（見 CLAUDE.md tech gotchas），
+# 改用手動 sys.path 補救、不依賴 editable install 的 finder。
+import sys as _sys
+from pathlib import Path as _Path
+_MCP_FORK = _Path(__file__).resolve().parents[2] / "mcp-taiwan-legal-db"
+if _MCP_FORK.exists() and str(_MCP_FORK) not in _sys.path:
+    _sys.path.insert(0, str(_MCP_FORK))
+try:
+    from mcp_server.parsers.interpretation_parser import parse_interpretation
+except ImportError:  # 極罕見：fork 未安裝時讓 analyze 仍能跑（reasoning 走 fallback）
+    parse_interpretation = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
 
@@ -378,6 +393,49 @@ def _smart_truncate(text: str, budget: int, keywords: list[str] | None = None) -
     return text[:head] + "\n\n[…中略…]\n\n" + text[-tail:]
 
 
+# ─── 舊制釋字 reasoning 過濾（AI 精讀專用） ────
+_OLD_INTERP_CID_RE = re.compile(r"釋字第?\s*(\d+)\s*號?")
+
+
+def _old_interp_filtered_reasoning(judgment: dict) -> str | None:
+    """若 judgment 為舊制釋字（1-813）、回傳過濾成「本院認定」的 reasoning。
+
+    - 丟棄 petitioner_claim（聲請意旨、當事人 / 關係機關主張）
+    - 丟棄 signatures（大法官署名、只是名單）
+    - 保留 court_reasoning + conclusion → 核心法律論述
+    - 保留 procedural_ruling → 601 型受理程序法院認定段（仍屬本院認定）
+
+    回 None 代表不適用（非舊制釋字 / parser 失敗 / 無可用 sections）、
+    由 caller 用原始 reasoning（no-op）。**不影響新制憲判字或一般判決**。
+    """
+    if parse_interpretation is None:
+        return None
+    case_id = judgment.get("case_id") or ""
+    if not is_old_interpretation(case_id):
+        return None
+    m = _OLD_INTERP_CID_RE.search(case_id)
+    if not m:
+        return None
+    reasoning = judgment.get("reasoning") or ""
+    if not reasoning.strip():
+        return None
+    try:
+        parsed = parse_interpretation(
+            cid=int(m.group(1)),
+            main_text=judgment.get("main_text") or "",
+            reasoning=reasoning,
+        )
+        wanted = [
+            s["text"] for s in (parsed.get("sections") or [])
+            if s.get("role") in ("procedural_ruling", "court_reasoning", "conclusion")
+        ]
+        if not wanted:
+            return None  # parser 切不到本院見解段 → 保守回原文
+        return "\n\n".join(wanted)
+    except Exception:
+        return None
+
+
 def _get_field_text(
     judgment: dict,
     ai_read_fields: list[str],
@@ -393,10 +451,17 @@ def _get_field_text(
     budget_override：覆蓋 FIELD_BUDGET_TOTAL（兩階段評分第一輪用 SCREENING_BUDGET）。
     """
     total_budget = budget_override or FIELD_BUDGET_TOTAL
+    # 舊制釋字：reasoning 預先過濾到「本院見解 + 結論」、丟棄聲請意旨 / 大法官署名。
+    # 新制憲判字與一般判決此值為 None、下方照原樣讀 reasoning 欄位（不影響）。
+    _old_interp_reasoning_filtered = _old_interp_filtered_reasoning(judgment)
+
     # 第一遍：收集所有欄位的原始文字
     raw_fields: list[tuple[str, str, str]] = []  # (field_name, label, text)
     for field in ai_read_fields:
         value = judgment.get(field)
+        if field == "reasoning" and _old_interp_reasoning_filtered is not None:
+            # 舊制釋字 + parser 成功 → 用過濾後 reasoning 取代原值
+            value = _old_interp_reasoning_filtered
         if not value:
             continue
         label = FIELD_LABELS.get(field, field)

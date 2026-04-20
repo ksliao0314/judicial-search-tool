@@ -50,12 +50,67 @@ async def list_judgments(
 
 @router.get("/tasks/{task_id}/judgments/{case_id}")
 async def get_judgment_detail(task_id: str, case_id: str) -> dict:
-    """取得單筆判決全文（供閱讀器頁使用）。"""
+    """取得單筆判決全文（供閱讀器頁使用）。
+
+    舊制釋字（釋字第1-813號）：額外 inject `sections` 結構（本院見解 / 聲請意旨 /
+    結論 / 大法官署名）供 Reader UI 顯示 sub-header。新制憲判字 / 一般判決不動。
+    """
     judgments = await db.get_task_judgments(task_id)
     for j in judgments:
         if j["case_id"] == case_id:
+            _maybe_attach_interp_sections(j)
             return j
     raise HTTPException(status_code=404, detail="Judgment not found")
+
+
+# 舊制釋字 reader sections 注入 — 失敗 fail-safe（不存在 sections 欄位、Reader fallback 純文字渲染）
+# Path manipulation：iCloud UF_HIDDEN 讓 .pth 被 skip（見 CLAUDE.md / tech gotchas 記憶）、
+# 改用手動 sys.path 補救、不依賴 editable install 的 finder。
+import re as _re
+import sys as _sys
+from pathlib import Path as _Path
+_MCP_FORK = _Path(__file__).resolve().parents[2] / "mcp-taiwan-legal-db"
+if _MCP_FORK.exists() and str(_MCP_FORK) not in _sys.path:
+    _sys.path.insert(0, str(_MCP_FORK))
+try:
+    from mcp_server.parsers.interpretation_parser import parse_interpretation as _parse_interp
+except ImportError:
+    _parse_interp = None  # type: ignore[assignment]
+
+from src.pipeline.cons_normalizer import is_old_interpretation as _is_old_interp
+_OLD_CID_RE = _re.compile(r"釋字第?\s*(\d+)\s*號?")
+
+
+def _maybe_attach_interp_sections(judgment: dict) -> None:
+    """舊制釋字專用 — inject `interp_sections` 欄位到 judgment dict。
+
+    新制憲判字、一般判決：函式 no-op、直接返回（不新增任何欄位）。
+    Parser 失敗或無 reasoning：靜默略過、Reader 走 fallback 純文字路徑。
+    """
+    if _parse_interp is None:
+        return
+    case_id = judgment.get("case_id") or ""
+    if not _is_old_interp(case_id):
+        return
+    m = _OLD_CID_RE.search(case_id)
+    if not m:
+        return
+    reasoning = judgment.get("reasoning") or ""
+    if not reasoning.strip():
+        return
+    try:
+        parsed = _parse_interp(
+            cid=int(m.group(1)),
+            main_text=judgment.get("main_text") or "",
+            reasoning=reasoning,
+            issues=judgment.get("facts") or "",
+        )
+        sections = parsed.get("sections") or []
+        if sections:
+            judgment["interp_sections"] = sections
+            judgment["interp_era"] = parsed.get("era", "")
+    except Exception:
+        return
 
 
 @router.get("/tasks/{task_id}/judgments/{case_id}/pdf")
@@ -105,3 +160,4 @@ async def download_bulk_pdf(task_id: str, body: BulkPdfRequest):
         media_type="application/zip",
         headers={"Content-Disposition": 'attachment; filename="judgments.zip"'},
     )
+

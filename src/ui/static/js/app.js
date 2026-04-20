@@ -5578,17 +5578,28 @@ function renderRcOutline(text) {
     if (mtIdx >= 0) items.push({ level: 0, text: '解釋文', offset: mtIdx });
     if (rIdx >= 0) items.push({ level: 0, text: '解釋理由書', offset: rIdx });
 
-    // 掃理由書內的 L1 marker：段落起首（前面是 \n\n 或 body 起始）的 一、/二、...
+    // 掃理由書內的 sub-header：
+    //   (a) parser 注入的「聲請意旨/本院見解/結論」→ 固定小標、必加入
+    //   (b) 段落起首的 一、二、三... outline marker（僅 ≥2 個才加）
     // 段內表列（如 445「禁制區...為：一、總統府」）前面是「：」，不命中 \n\n，避免誤判。
-    // 最少要 2 個才加進側欄。
-    //
-    // 實作要點：先跳過「解釋理由書\n」header + 後續空白，從 body 第一字開始掃，
-    // `^` 就能命中 body 起首的「一、」（如釋字 613 第一段直接以「一、」開頭）
     if (rIdx >= 0) {
       const headerLen = '解釋理由書'.length;
       let bodyStart = rIdx + headerLen;
       while (bodyStart < text.length && /[\s\n]/.test(text[bodyStart])) bodyStart++;
       const body = text.slice(bodyStart);
+
+      // (a) parser 子標題
+      for (const subTitle of ['聲請意旨', '受理程序', '本院見解', '結論']) {
+        const stRe = new RegExp('(?:^|\\n\\s*\\n)\\s*(' + subTitle + ')(?=\\s*\\n)', 'g');
+        let stm;
+        while ((stm = stRe.exec(body)) !== null) {
+          const offset = bodyStart + stm.index + stm[0].indexOf(subTitle);
+          items.push({ level: 1, text: subTitle, offset });
+          break;  // 每個子標題只出現一次
+        }
+      }
+
+      // (b) 段落起首 一、二、三 outline marker
       const L1_RE = /(?:^|\n\s*\n)\s*([一二三四五六七八九十]{1,3}、\s*[\u4e00-\u9fff][^\n]{0,60})/g;
       const subItems = [];
       let m;
@@ -6280,7 +6291,17 @@ function renderRcCombinedText() {
     // 舊釋字：解釋文 + 解釋理由書 兩大塊，標題用本身語境
     // 爭點（cons 的 issues）存在 facts 欄位、但已在 header 的案由 pill 顯示、這裡不重複
     if (mainText) combined += '解釋文\n' + mainText + '\n\n';
-    if (reasoning) combined += '解釋理由書\n' + reasoning;
+    if (reasoning) {
+      // 若 API 回傳 interp_sections（parser 切好的結構）→ 用 sub-header 組合；
+      // 否則 fallback 純文字（Era A 無理由書 / parser 失敗的保底）
+      const sections = _readerJudgment.interp_sections || [];
+      if (Array.isArray(sections) && sections.length > 0) {
+        // 解釋理由書 獨立成 block、sub-header 段接著獨立 block（雙換行區隔）
+        combined += '解釋理由書\n\n' + _buildInterpReasoningWithSubheaders(sections, reasoning);
+      } else {
+        combined += '解釋理由書\n' + reasoning;
+      }
+    }
   } else {
     if (mainText) combined += '主　文\n' + _splitMainTextSentences(mainText) + '\n\n';
     if (facts) combined += '事　實\n' + facts + '\n\n';
@@ -6359,19 +6380,44 @@ function renderRcCombinedText() {
   textEl.innerHTML = html;
 }
 
+// 把 parser 切好的 interp_sections 組成 reasoning 內文 + 子標題混排文字。
+// 子標題用 SECTION_SUB_HEADERS 認識（與大標題「解釋文」「解釋理由書」區隔 styling）
+// 大法官署名 (signatures) 不含在此 — 既有邏輯透過 judges 欄位以獨立區塊呈現、
+// 避免 reader 內重複顯示同一份大法官名單。
+function _buildInterpReasoningWithSubheaders(sections, fallbackReasoning) {
+  // role → 顯示子標題對照；signatures 不輸出（由 judges block 處理）
+  const roleTitles = {
+    petitioner_claim: '聲請意旨',
+    procedural_ruling: '受理程序',
+    court_reasoning: '本院見解',
+    conclusion: '結論',
+  };
+  const parts = [];
+  for (const s of sections) {
+    const title = roleTitles[s.role];
+    if (!title) continue;  // skip signatures or unknown roles
+    const text = (s.text || '').trim();
+    if (!text) continue;
+    parts.push(title + '\n' + text);
+  }
+  return parts.length ? parts.join('\n\n') : fallbackReasoning;
+}
+
 // 舊釋字極簡 render：跳過 parseJudgmentParagraphs、outline 偵測、段落合併等
-// 邏輯，直接把 combined text 依段落分隔符切成 <p>。處理三種特殊行：
+// 邏輯，直接把 combined text 依段落分隔符切成 <p>。處理四種特殊行：
 //   1. section header（「解釋文」「解釋理由書」）→ 大字 + 橫線
-//   2. 一般段落 → 縮排首行（中文排版慣例）的 <p>
-//   3. 段落內若已含 \n（罕見）→ 當段落內軟換行
+//   2. sub-section header（「聲請意旨」「本院見解」「結論」）→ 小字 + 短橫線
+//   3. 一般段落 → 縮排首行（中文排版慣例）的 <p>
+//   4. 段落內若已含 \n（罕見）→ 當段落內軟換行
 function _renderInterpretationPlain(text) {
   if (!text) return '';
   const SECTION_HEADERS = new Set(['解釋文', '解釋理由書']);
+  const SECTION_SUB_HEADERS = new Set(['聲請意旨', '受理程序', '本院見解', '結論']);
   // 先按 \n\n 切大段
   const blocks = text.split(/\n\s*\n+/).map(b => b.trim()).filter(Boolean);
   const parts = [];
   for (const block of blocks) {
-    // Block 第一行可能是 section header
+    // Block 第一行可能是 section header 或 sub-header
     const nlIdx = block.indexOf('\n');
     const firstLine = (nlIdx === -1 ? block : block.slice(0, nlIdx)).trim();
     if (SECTION_HEADERS.has(firstLine)) {
@@ -6379,6 +6425,18 @@ function _renderInterpretationPlain(text) {
         <div class="relative mt-6 mb-3" data-offset="${text.indexOf(block)}">
           <div class="border-b border-warm-300 pb-2">
             <h3 class="font-serif text-base font-semibold text-ink tracking-wide">${escHtml(firstLine)}</h3>
+          </div>
+        </div>`);
+      const rest = nlIdx === -1 ? '' : block.slice(nlIdx + 1).trim();
+      if (rest) {
+        parts.push(_renderInterpretationParagraph(rest, text.indexOf(block) + nlIdx + 1));
+      }
+    } else if (SECTION_SUB_HEADERS.has(firstLine)) {
+      // 子標題：small font、細橫線、縮幾 px 區別於大標題
+      parts.push(`
+        <div class="relative mt-4 mb-2" data-offset="${text.indexOf(block)}">
+          <div class="border-b border-warm-200 pb-1">
+            <h4 class="font-serif text-sm font-medium text-warm-500 tracking-wider">${escHtml(firstLine)}</h4>
           </div>
         </div>`);
       const rest = nlIdx === -1 ? '' : block.slice(nlIdx + 1).trim();
@@ -6878,11 +6936,19 @@ function buildCombinedText() {
   // 必須跟 renderRcCombinedText 完全一致（主文要先 _splitMainTextSentences），
   // 否則 outline 的 offset 跟主區段落的 data-offset 對不上，點 outline 會跳錯位置。
   if (!_readerJudgment) return '';
-  // 舊釋字走簡化格式：解釋文 + 解釋理由書（與 renderRcCombinedText 一致）
+  // 舊釋字走簡化格式：解釋文 + 解釋理由書（須與 renderRcCombinedText 完全一致、
+  // 否則 outline 的 offset 跟主區段落的 data-offset 對不上、點 outline 會跳錯位置）
   if (_isOldInterpretationReader()) {
     let t = '';
     if (_readerJudgment.main_text) t += '解釋文\n' + _readerJudgment.main_text + '\n\n';
-    if (_readerJudgment.reasoning) t += '解釋理由書\n' + _readerJudgment.reasoning;
+    if (_readerJudgment.reasoning) {
+      const sections = _readerJudgment.interp_sections || [];
+      if (Array.isArray(sections) && sections.length > 0) {
+        t += '解釋理由書\n\n' + _buildInterpReasoningWithSubheaders(sections, _readerJudgment.reasoning);
+      } else {
+        t += '解釋理由書\n' + _readerJudgment.reasoning;
+      }
+    }
     return t.trim() || (_readerJudgment.full_text || '');
   }
   let t = '';

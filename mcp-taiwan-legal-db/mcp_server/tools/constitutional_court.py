@@ -32,6 +32,8 @@ from tenacity import (
     wait_exponential,
 )
 
+from mcp_server.parsers.interpretation_parser import parse_interpretation
+
 BASE = "https://cons.judicial.gov.tw"
 TIMEOUT = 15.0
 
@@ -597,6 +599,28 @@ def get_interpretation(
     )
 
 
+def _inject_old_sections(result: dict, number: int, reasoning_text: str) -> None:
+    """舊制釋字專用：把結構化 sections 灌入 result。
+
+    只在 caller 有要 reasoning（include_reasoning 或 keyword）時執行、避免預設層
+    token 膨脹。失敗時靜默略過（sections 欄位不存在）、不破壞既有回傳。
+
+    新制憲判字（_get_new_ruling 路徑）不調用此 helper、結構由判決格式 parser 處理。
+    """
+    try:
+        parsed = parse_interpretation(
+            cid=number,
+            main_text=result.get("main_text", ""),
+            reasoning=reasoning_text or "",
+            issues=result.get("issues", ""),
+        )
+        result["sections"] = parsed.get("sections", [])
+        result["era"] = parsed.get("era", "")
+    except Exception:
+        # Parser 對 813 則 regression 已測過、但仍 fail-safe 確保 MCP response 不因此壞
+        pass
+
+
 def _get_old_interpretation(
     number: int,
     include_reasoning: bool,
@@ -638,6 +662,9 @@ def _get_old_interpretation(
             }
             _attach_long_field(result, cached.get("reasoning", ""), "reasoning", include_reasoning, kw_r)
             _attach_long_field(result, cached.get("opinions", ""), "opinions", include_opinions, kw_o)
+            # sections 僅在 caller 有要 reasoning 時注入（預設層保持精簡）
+            if include_reasoning or kw_r:
+                _inject_old_sections(result, number, cached.get("reasoning", ""))
             return result
 
     try:
@@ -689,6 +716,9 @@ def _get_old_interpretation(
     _attach_long_field(
         result, parsed.get(OLD_OPINIONS_KEY, ""), "opinions", include_opinions, opinions_keyword
     )
+    # sections 僅在 caller 有要 reasoning 時注入
+    if include_reasoning or (reasoning_keyword or "").strip():
+        _inject_old_sections(result, number, parsed.get("理由書", ""))
 
     return result
 
