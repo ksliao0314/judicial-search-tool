@@ -2714,7 +2714,9 @@ function renderStage3View(analysis, relevant, irrelevant) {
     relEl.innerHTML = relevant.map(r => {
       const score = r.primary_score ?? 0;
       const position = r.primary_reason ?? r.reason ?? '';
-      const excerpt = r.primary_excerpt ?? r.excerpt ?? '';
+      const rawExcerpt = r.primary_excerpt ?? r.excerpt ?? '';
+      // 剝掉 [理由] / [主文] 等 found_in label prefix（見 4692 同一處理）
+      const excerpt = rawExcerpt.replace(/^\[(理由|主文|事實|引用法條|全文)\]\s*/, '');
       const safeId = escAttr(r.case_id);
       const scoreColor = score >= 7 ? 'text-seal' : score >= 4 ? 'text-warm-500' : 'text-warm-400';
       return `
@@ -4689,7 +4691,10 @@ function renderCardResultsPage(reset = false) {
     const idx = start + i;
     lookup[idx] = r;
     const excerpt = r.primary_excerpt ?? r.excerpt ?? '';
-    const excerptDisplay = excerpt ? excerpt.slice(0, 150) : '';
+    // 剝掉開頭的 [理由] / [主文] / [事實] / [引用法條] / [全文] label（found_in 指示器）、
+    // 列表用 150 字摘要已無空間放這種 meta、且 UI 欄位已各自標示所屬來源、重複顯示多餘
+    const excerptClean = excerpt.replace(/^\[(理由|主文|事實|引用法條|全文)\]\s*/, '');
+    const excerptDisplay = excerptClean ? excerptClean.slice(0, 150) : '';
     const parsed = parseCaseDisplay(r.case_id);
     const isRead = state.card.readCaseIds.has(r.case_id);
     const isStarred = state.starred.has(r.case_id);
@@ -7658,7 +7663,9 @@ function renderJudgmentList(items) {
     const score  = j.primary_score ?? j.score ?? null;
     const match  = j.primary_match ?? j.match ?? '';
     const sec    = j.secondary_score;
-    const excerpt = j.primary_excerpt ?? j.excerpt ?? '';
+    const rawExcerpt = j.primary_excerpt ?? j.excerpt ?? '';
+    // 剝掉 [理由] / [主文] 等 found_in label prefix（列表已有欄位 pill 標示來源）
+    const excerpt = rawExcerpt.replace(/^\[(理由|主文|事實|引用法條|全文)\]\s*/, '');
     const matchCls = match === 'yes' ? 'match-yes' : match === 'partial' ? 'match-partial' : '';
     const scoreColor = score >= 7 ? 'text-seal' : score >= 5 ? 'text-warm-500' : 'text-warm-400';
     const matchLabel = { yes:'完全命中', partial:'部分命中', no:'未命中', error:'錯誤' }[match] || '';
