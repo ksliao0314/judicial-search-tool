@@ -678,6 +678,40 @@ jq -r 'select(.anomaly_types[] == "outline_number_gap") | .metrics.outline_gaps'
 
 **文化約定**：新增或調整 parser heuristic 前，先跑上述 jq 查詢確認當前痛點；改完後搭配 `tests/test_judgment_structure_regression.py` 的 5 件 fixture 守門避免退步。長期看 anomaly log 類型分布的趨勢（某種 anomaly 類型從月均 50 降到 5，即為 heuristic 改動成功的量化證據）。
 
+### 用 `data/excerpt_anomalies.jsonl` 觀察 Claude excerpt 品質
+
+2026-04-20 加的 V2 prompt 規則、強制 Claude 從**法院判斷段落**挑 excerpt、禁止主文 / 當事人主張 / 證人證述。落實程度用這個 log 監測、每週看一次、決定是否要加後處理 re-pick。
+
+**偵測三種異常**（見 [`src/utils/excerpt_anomaly_log.py`](src/utils/excerpt_anomaly_log.py)）：
+
+| Kind | 意義 | 觸發時該做什麼 |
+|---|---|---|
+| `party_claim_prefix` | excerpt 開頭匹配「原告/被告/上訴人/…（所有程序當事人）…主張/抗辯/略以」 | > 10% → Claude 不聽話、加後處理從 reasoning 選「本院…」段替換 |
+| `main_text_leak` | excerpt 是 `main_text` 子字串 | 應近零；> 5% 代表 prompt 禁止主文規則失效、收緊 prompt |
+| `empty_but_scored` | score > 0 但 excerpt 空 | > 10% 代表 prompt 過嚴、Claude over-correct 找不到可用段落、放寬規則 / fallback 更聰明 |
+
+**每週觀察配方**：
+```bash
+# 各類觸發比例
+jq -r '.kind' data/excerpt_anomalies.jsonl | sort | uniq -c | sort -rn
+
+# 最常違規的 case → 看是哪種判決格式讓 Claude 失手（簡易裁定？釋字？）
+jq -r '.case_id' data/excerpt_anomalies.jsonl | sort | uniq -c | sort -rn | head
+
+# party_claim_prefix 的 excerpt 實例、看 Claude 到底取了什麼、調整 prompt
+jq -r 'select(.kind == "party_claim_prefix") | .excerpt_preview' \
+   data/excerpt_anomalies.jsonl | head -20
+
+# empty_but_scored 的 case — prompt 太嚴的徵兆
+jq -r 'select(.kind == "empty_but_scored") | [.case_id, .score] | @tsv' \
+   data/excerpt_anomalies.jsonl | head -20
+```
+
+**決策門檻**：
+- 三類觸發都 **< 5%** → Prompt 就夠了、不必後處理
+- `party_claim_prefix` ≥ 10% → 加 post-process re-pick
+- `empty_but_scored` ≥ 10% → 放寬 prompt（可能太嚴苛、讓 Claude 找不到可用段落）
+
 ### 加新分析欄位（如 court_tier, citation_density）
 1. `schema.sql` 加欄位
 2. `db/database.py` 的 `get_task_judgments` SELECT 含新欄位

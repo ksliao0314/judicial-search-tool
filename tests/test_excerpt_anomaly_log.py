@@ -28,6 +28,26 @@ def test_party_claim_prefix_detected():
     )
 
 
+def test_party_claim_all_procedural_variants():
+    """所有程序當事人變體都該被偵測（原告、被告之外的類型）。"""
+    cases = [
+        '被上訴人答辯略以：被告違反程序',
+        '抗告人主張原裁定違誤',
+        '聲請人略以：系爭處分應予停止執行',
+        '相對人答辯如下',
+        '參加人主張本案與其利害有關',
+        '再審原告主張原判決適用法規顯有錯誤',
+        '再審被告答辯稱',
+        '自訴人指稱被告涉嫌',
+        '告訴人陳稱其遭詐騙',
+        '反訴原告主張被告違約',
+        '選定當事人主張',
+    ]
+    for ex in cases:
+        kinds = detect_anomaly_kinds(excerpt=ex, score=7, main_text=None)
+        assert 'party_claim_prefix' in kinds, f'失誤：{ex!r} 沒被偵測'
+
+
 def test_party_claim_prefix_not_triggered_on_court_text():
     # 法院判斷段落開頭、不該觸發
     assert 'party_claim_prefix' not in detect_anomaly_kinds(
