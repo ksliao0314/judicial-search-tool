@@ -4217,16 +4217,13 @@ async function renderCardResults(analysisId) {
 
   // User question
   document.getElementById('card-results-question').textContent = analysis.question || '';
-  // 分析範圍 meta（N 筆判決 · 欄位）
+  // 分析範圍 meta：實際分析筆數（= 相關 + 無關 + 資料異常）、不是 analysis.total 的 step count
   const scopeEl = document.getElementById('card-results-scope');
   if (scopeEl) {
-    const total = (analysis.total != null ? analysis.total : state.card.allResults.length)
-      + (state.card.irrelevantResults?.length || 0);
-    const fields = (analysis.ai_read_field || '').split(',').filter(Boolean);
-    const fieldLabel = { reasoning: '理由', main_text: '主文', facts: '事實',
-                         cited_statutes: '引用法條', full_text: '全文' };
-    const fieldTxt = fields.length ? fields.map(f => fieldLabel[f] || f).join('、') : '理由';
-    scopeEl.textContent = `分析範圍：${total} 筆判決 · 僅${fieldTxt}`;
+    const total = (state.card.allResults?.length || 0)
+                + (state.card.irrelevantResults?.length || 0)
+                + (state.card.dataErrorResults?.length || 0);
+    scopeEl.textContent = `分析範圍：${total} 筆判決`;
   }
 
   // Analysis history tabs
