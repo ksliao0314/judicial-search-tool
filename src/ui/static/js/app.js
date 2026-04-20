@@ -4579,6 +4579,13 @@ function renderCardClusterTabs() {
       }
       renderCardClusterTabs();
       renderCardResultsPage(true);
+      // 若 reader 還開著（律師沒關就切 tab）、同步刷 nav button 的 enable/disable
+      // 狀態、避免 prev/next 指向已不在新 pool 的判決。律師實際 workflow 不會這麼做、
+      // 但 defensive 成本極低
+      if (typeof _updateNavButtons === 'function') {
+        const readerCard = document.getElementById('reader-card');
+        if (readerCard && !readerCard.classList.contains('hidden')) _updateNavButtons();
+      }
     });
   });
 }
@@ -6951,6 +6958,24 @@ function _normalizeCaseId(s) {
 // 用 Map 以 normalized case_id 為 key 去重 — 避免萬一同判決在多個 bucket 間的
 // whitespace variant 造成「自身循環」開啟
 function _readerNavList() {
+  // 2026-04-20 改：pool 跟當下 cluster tab 走（getCardVisibleResults 回同一份）。
+  // 原設計用固定全池、律師反饋「在 A 標籤下、上下則應限 A 標籤」更符合直覺。
+  // 情境 B（切 tab 但 reader 還開著、current judgment 不在新 pool）由
+  // _navigateJudgment 的 idx<0 自然處理 + button disable。
+  if (state.card && Array.isArray(state.card.allResults) && typeof getCardVisibleResults === 'function') {
+    try {
+      const visible = getCardVisibleResults();
+      if (Array.isArray(visible)) {
+        const seen = new Map();
+        for (const r of visible) {
+          const key = _normalizeCaseId(r?.case_id);
+          if (key && !seen.has(key)) seen.set(key, r);
+        }
+        return Array.from(seen.values());
+      }
+    } catch {}
+  }
+  // Fallback：card 還沒 init 或 getCardVisibleResults 失敗（legacy 進入路徑）
   if (!state.card || !Array.isArray(state.card.allResults)) {
     return (typeof filteredJudgments === 'function') ? filteredJudgments() : [];
   }
@@ -6972,6 +6997,8 @@ function _navigateJudgment(delta) {
   if (!taskId) return;
   const list = _readerNavList();
   if (!list.length) return;
+  // 當下 cluster 只有 1 筆（就是 reader 開著的這筆）→ 明確 toast、不說「已是第一/最後」
+  if (list.length === 1) { _showReaderToast('此分類僅有一則判決'); return; }
   const cur = _normalizeCaseId(_readerJudgment.case_id);
   const idx = list.findIndex(j => _normalizeCaseId(j.case_id) === cur);
   if (idx < 0) return;
