@@ -5852,7 +5852,8 @@ function _looksLikeMCPHardBreakedName(paraText, newLine) {
 //   - 428 號「㈠」「(二)」prev 行短且句末標點 → 不合併、保留 outline
 //   - 合法 L1「二、認定犯罪事實」prev 行以「。」結尾 → 不合併
 // 句末/分段結尾 punct：包含冒號（「如下：」「下述：」常後接 outline list）+ ……
-const _SENTENCE_END_RE = /[。；？！：:」』）)…]$/;
+// 半形 ?! 也納入（司法院偶爾用半形問號，如 111 訴 214「...是否適法?」後接 L1）
+const _SENTENCE_END_RE = /[。；？！：:?!」』）)…]$/;
 const _MCP_HARDBREAK_MIN_LEN = 22;  // 司法院 hard-break 典型 25-28 字，給 22 為保守閾值
 
 function _isMCPHardBreakContinuation(rawPrevLine, trimmedCurLine) {
