@@ -9,9 +9,12 @@ V2 prompt 要求 Claude 從「法院判斷段落」挑 excerpt、不要挑主文
     若 empty_but_scored 比例高 → prompt 太嚴、考慮放寬
 
 偵測類型：
-    party_claim_prefix — excerpt 開頭是「原告主張/被告抗辯/...」等當事人用語
-    main_text_leak    — excerpt 是 main_text 的完整子字串（主文洩漏）
-    empty_but_scored  — excerpt 為空但 score > 0（可能 prompt 過嚴、over-correct）
+    party_claim_prefix     — excerpt 開頭是「原告主張/被告抗辯/...」等當事人用語
+    main_text_leak         — excerpt 是 main_text 的完整子字串（主文洩漏）
+    empty_but_scored       — excerpt 為空但 score > 0（可能 prompt 過嚴、over-correct）
+    charge_imposition_leak — excerpt 含刑事判決「論罪/論罪科刑/罪數/量刑」典型語句
+                             （「核被告X所為，均係犯刑法第Y條」「應依...論處」等）
+                             這是構成要件成立後的 downstream 決定、不是構成要件認定本身
 
 JSONL 格式：每行一個 dict
     {
@@ -55,6 +58,27 @@ _PARTY_CLAIM_PREFIX_RE = re.compile(
     r'(?:主張|起訴|略以|抗辯|答辯|辯稱|陳述|陳稱|聲明|指稱|質疑|爭執|訴稱|聲請|求為)'
 )
 
+# 刑事判決「論罪 / 論罪科刑 / 罪數 / 量刑」典型語句
+# 這些是構成要件成立後的 downstream 決定、不該作為「法院如何認定構成要件」的 excerpt
+# 規則：excerpt 內任何位置出現任一 pattern 都算命中（不限開頭）
+# Pattern 設計以「關鍵 token 組合」為主、允許中間插入任意字（被告名單等）
+_CHARGE_IMPOSITION_PATTERNS = [
+    # 論罪：X 所為，（均）係犯（刑法/本條例）/ 應依X條論處 / 論以X罪
+    # 「所為、均係犯」「所為、係犯」「係犯刑法第X條」都是論罪定番
+    re.compile(r'所為[^\n]{0,5}?(?:均)?(?:係|為)犯'),
+    re.compile(r'均(?:係|為)犯(?:刑法|本條例|[^\n。]{2,8}?(?:法|條例))'),
+    re.compile(r'應依[^\n。]{0,30}?(?:刑法|本條例)第[\u4e00-\u9fff\d]{1,8}條[^\n。]{0,30}?論處'),
+    re.compile(r'論以[^\n。]{0,20}?(?:一|二|三|X|\d)?罪'),
+    # 罪數：應以一罪論 / 數罪併罰 / 想像競合 / 從一重論處 / 接續犯
+    re.compile(r'應以[^\n]{0,5}?一罪論'),
+    re.compile(r'數罪併罰'),  # 極特定刑法術語、單獨出現即屬論罪段
+    re.compile(r'想像競合犯'),
+    re.compile(r'從一重(?:罪)?(?:論處|處斷)'),
+    # 量刑：爰以行為人之責任 / 爰審酌被告 / 爰依刑法第57條 / 量處X刑
+    re.compile(r'爰(?:以行為人之責任|審酌|依)'),
+    re.compile(r'量處.{0,10}?(?:有期徒刑|拘役|罰金)'),
+]
+
 
 def detect_anomaly_kinds(*, excerpt: str, score: int | None, main_text: str | None) -> list[str]:
     """回傳此 excerpt 觸發的 anomaly kind list（空 list = 無異常）。同步 function、純 string check。"""
@@ -76,6 +100,10 @@ def detect_anomaly_kinds(*, excerpt: str, score: int | None, main_text: str | No
     # empty_but_scored: score > 0 但 excerpt 空（可能 prompt 太嚴）
     if score is not None and score > 0 and not excerpt_clean:
         kinds.append('empty_but_scored')
+
+    # charge_imposition_leak: excerpt 含刑事論罪 / 罪數 / 量刑典型語句
+    if excerpt_clean and any(p.search(excerpt_clean) for p in _CHARGE_IMPOSITION_PATTERNS):
+        kinds.append('charge_imposition_leak')
 
     return kinds
 

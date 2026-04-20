@@ -494,6 +494,20 @@
             <div class="flex items-baseline gap-3 mb-3">
               <span class="result-synthesis-title">AI 綜合彙整</span>
               <span id="card-synth-consensus" class="result-synthesis-consensus"></span>
+              <!-- 重新生成 icon（一律顯示；點擊先 confirm、避免誤觸耗費 token）-->
+              <button id="card-synth-refresh" type="button"
+                      title="重新生成摘要與智慧分類（會再跑一次 AI 分析）"
+                      aria-label="重新生成摘要與智慧分類"
+                      class="ml-auto text-warm-400 hover:text-seal transition-colors
+                             w-6 h-6 flex items-center justify-center rounded-sm shrink-0">
+                <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24"
+                     fill="none" stroke="currentColor" stroke-width="2"
+                     stroke-linecap="round" stroke-linejoin="round">
+                  <polyline points="23 4 23 10 17 10"/>
+                  <polyline points="1 20 1 14 7 14"/>
+                  <path d="M3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"/>
+                </svg>
+              </button>
             </div>
             <p id="card-synth-summary" class="result-synthesis-body"></p>
           </div>

@@ -4478,6 +4478,59 @@ async function handleResumeAnalysis() {
   }
 }
 
+// 通用 centered confirm dialog — 米紙 + 暖銅配色、回傳 Promise<boolean>
+// 取代 browser native confirm()（後者位置由瀏覽器決定、常在上方不夠突出）
+function showCenteredConfirm({ title = '確認', message, confirmText = '確定', cancelText = '取消' } = {}) {
+  return new Promise(resolve => {
+    const overlay = document.createElement('div');
+    overlay.className = 'fixed inset-0 bg-ink/40 z-[200] flex items-center justify-center';
+    overlay.innerHTML = `
+      <div class="bg-parchment rounded-sm shadow-xl border border-warm-300 w-[min(420px,90vw)] p-6">
+        <h3 class="font-serif text-base font-semibold text-ink mb-3">${escHtml(title)}</h3>
+        <p class="font-serif text-sm text-warm-600 leading-relaxed mb-5">${message}</p>
+        <div class="flex justify-end gap-2">
+          <button data-act="cancel"
+            class="px-4 py-1.5 text-sm font-mono text-warm-500 hover:text-ink border border-warm-300 hover:border-ink rounded-sm transition-colors">
+            ${escHtml(cancelText)}
+          </button>
+          <button data-act="ok"
+            class="px-4 py-1.5 text-sm font-mono text-parchment bg-ink hover:bg-warm-600 rounded-sm transition-colors">
+            ${escHtml(confirmText)}
+          </button>
+        </div>
+      </div>`;
+    const cleanup = (result) => {
+      overlay.remove();
+      document.removeEventListener('keydown', onKey);
+      resolve(result);
+    };
+    const onKey = (e) => {
+      if (e.key === 'Escape') cleanup(false);
+      else if (e.key === 'Enter') cleanup(true);
+    };
+    overlay.addEventListener('click', (e) => {
+      const act = e.target.closest('[data-act]')?.dataset.act;
+      if (act === 'ok') cleanup(true);
+      else if (act === 'cancel' || e.target === overlay) cleanup(false);
+    });
+    document.addEventListener('keydown', onKey);
+    document.body.appendChild(overlay);
+    overlay.querySelector('[data-act="ok"]').focus();
+  });
+}
+
+// 一次性綁定 header refresh icon click（index.html 元素永遠存在、不隨 render 重建）
+document.getElementById('card-synth-refresh')?.addEventListener('click', async () => {
+  if (!state.card.taskId || !state.card.analysisId) return;
+  const ok = await showCenteredConfirm({
+    title: '重新生成摘要',
+    message: '會再跑一次 AI 分析、消耗約 <span class="font-mono text-seal">US$0.05–0.10</span>。既有結果會在生成中被暫時覆蓋為 loading、失敗時自動回復。',
+    confirmText: '確定重跑',
+    cancelText: '取消',
+  });
+  if (ok) reSynthesis();
+});
+
 async function reSynthesis() {
   const taskId = state.card.taskId;
   const analysisId = state.card.analysisId;
@@ -5173,7 +5226,7 @@ const _QUOTE_MARKERS_CITATION = 10;
 //     法院X年X字第N號判決可資參照）。要求「按」貼著「，且前面是句首/空白/標點，
 //     避免 `按民法…，「相對人」乃指…` 等定義性引號被誤判
 const _CITATION_PREFIX_PATTERNS = [
-  /(?:判決(?:意旨)?|裁定(?:意旨)?|大法官解釋|憲法解釋|司法院解釋|解釋(?:意旨|文)?|函釋|函示|函文|要旨|意旨|略以|略謂|明定|明文規定|揭示|認為|認定|指出|參照|規定|條)$/,
+  /(?:判決(?:意旨)?|裁定(?:意旨)?|大法官解釋|憲法解釋|司法院解釋|解釋(?:意旨|文)?|函釋|函示|函文|要旨|意旨|略以|略謂|略稱|陳稱|陳述|辯稱|答辯|聲稱|指稱|訴稱|主張|明定|明文規定|揭示|認為|認定|指出|參照|規定|條)$/,
   /\d+年度?\S{1,20}字第?\d+號(?:判決|裁定)?$/,
   /(?:^|[\s\u3000、，,。；;])按$/,
 ];
@@ -5364,7 +5417,37 @@ function _evaluateBlockAndPush(block, result, tailParagraphs) {
 // 邏輯：從頭到尾掃一次、維護 openQuotes 計數（「 +1、」 -1）。在 openQuotes>0 狀態下
 // 碰到 L1-L5 outline marker、直接 merge 回前段。
 //
-// 保護：連續 MAX_QUOTE_SPAN=5 段未收口就 bail out（防 parser 對不齊導致整份 merge 失控）。
+// 保護：連續 MAX_QUOTE_SPAN 段未收口就 bail out（防 parser 對不齊導致整份 merge 失控）。
+//
+// Citation-context awareness（2026-04-20）：改用 `_countRelevantOpens(text)` 取代
+// naive `「` 計數。只有出現在 citation prefix（判決 / 裁定 / 解釋 / 條 / 按 / 規定 等）
+// 後的 `「` 才累計 openQuotes。orphan `「`（司法院原文 missing `」` 的情境，常見於
+// 一般 prose 內、無 citation prefix）被視為普通字元、不觸發 Pass 2.6 合併、L1/L2
+// outline 保持原樣。
+//
+// 實例：
+//   - 104 年度訴字第 428 號：pos 4264 的「若技術上可得回復...」orphan 「 無 citation
+//     prefix → 不累計 → 後續「五、本院的判斷」「(一)」「(二)」outline 不被合併。
+//   - 113 年度易字第 681 號「PYROSAFE」orphan 「 同理不合併、「三、論罪科刑」保留。
+//   - 105 訴 1766 委員四陳述 "「…(四)…(五)…」" 型（原始 Pass 2.6 設計用例）：
+//     「 之前是「陳稱」citation prefix → 累計 → 跨段內的 outline marker 仍合併。
+//
+// MAX_QUOTE_SPAN 回 5（原設計值）— 合法 citation 可跨多段、orphan 已被 context 擋掉。
+function _countRelevantOpens(text) {
+  // 只累計 citation-context 下開啟的 「；orphan 「 不累計、視為字元
+  let depth = 0;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '「' || c === '『') {
+      const tail = text.slice(Math.max(0, i - 30), i);
+      if (_hasCitationContext(tail)) depth++;
+    } else if (c === '」' || c === '』') {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return depth;  // 正數 = 還有未關 citation 「；≤0 = 平衡或 orphan-only
+}
+
 function _unsplitInsideUnclosedQuote(paragraphs) {
   const MAX_QUOTE_SPAN = 5;
   const result = [];
@@ -5372,21 +5455,21 @@ function _unsplitInsideUnclosedQuote(paragraphs) {
   let spanCount = 0;
   for (const p of paragraphs) {
     const wasInQuote = openQuotes > 0 && spanCount < MAX_QUOTE_SPAN;
-    const opens = (p.text.match(/「/g) || []).length;
-    const closes = (p.text.match(/」/g) || []).length;
+    // 本段 citation-context 下未關 「 數增減（orphan 「 不算）
+    const paraNet = _countRelevantOpens(p.text);
     const canMerge = typeof p.level === 'number' && p.level >= 1 && p.level <= 5;
     if (wasInQuote && canMerge) {
       const prev = result[result.length - 1];
       if (prev && (typeof prev.level === 'number' || prev.level === null)) {
         prev.text = prev.text + p.text;
-        openQuotes += (opens - closes);
+        openQuotes += paraNet;
         if (openQuotes <= 0) { openQuotes = 0; spanCount = 0; }
         else spanCount += 1;
         continue;
       }
     }
     result.push(p);
-    const newOpen = openQuotes + (opens - closes);
+    const newOpen = openQuotes + paraNet;
     if (newOpen <= 0) { openQuotes = 0; spanCount = 0; }
     else { openQuotes = newOpen; spanCount = wasInQuote ? spanCount + 1 : 1; }
   }
@@ -5714,19 +5797,72 @@ function _getOutlineLevel(trimmedLine) {
   return _detectOutlineLevel(trimmedLine);
 }
 
-// 名字被 MCP 硬斷 guard：
-// 司法院 .text-pre 26 字硬斷 + 中文姓名含 CJK 數字結尾（e.g. 馬英九）→ 「馬英\n九、…」
-// 會被 _isOutlineStart 誤判為 L1 outline start。
-// 啟發式：前段尾 2-3 字皆 CJK 無標點 + 本行以單個 CJK 數字 [一-九] + 、起頭 → 續行，不當 outline。
-// 範圍刻意窄：只攔 [一-九]（最常見姓名字，如 王一 / 李二 / 馬英九），不攔 十、十一、壹、（一）等
-//   — 真實 outline 的 L1 轉折前 99% 以句末標點結尾，一般不會命中此 guard。
+// MCP 硬斷數字片段 guard：
+// 司法院 .text-pre 26 字硬斷會造成以下兩類誤判 outline：
+//   (1) 中文姓名含 CJK 數字結尾（e.g. 馬英九）→「馬英\n九、…」被當 L1
+//   (2) 多位數附表編號被硬斷（e.g.「如附表編號\n十三、十四所示」）→「十三、...」成 L1 片段
+// 啟發式：前段尾 2-3 字皆 CJK 無標點 + 本行以 1-4 位 CJK 數字 + 、起頭 → 續行、不當 outline。
+// 真 L1 outline 轉折前 99% 以句末標點（`。`/`；`）結尾，`。` 不在 CJK Unified Ideographs
+//   (U+4E00-U+9FFF) 範圍、tail 檢查會拒絕、guard 不觸發 → 合法 outline 不受影響。
+// 司法院硬斷行 + inline reference pattern：「...犯罪事實一之\n㈠所示罪刑項下」
+// 「...（原審卷\n㈧第61頁...）」「...原審卷㈡至\n㈣所標示」等
+// 前段尾為 reference particle（之 / 卷 / 至 / 於 / 依 / 如 / 即 / 第）+ 新行以 L2 marker
+// （㈠-㈩ 或 （一）-（十））起頭 → 此 L2 是 inline reference 不是 outline、應 merge。
+const _INLINE_REF_TAIL_RE = /[之卷至於依如即第]$/;
+
+function _looksLikeInlineL2Ref(paraText, newLine) {
+  if (!paraText) return false;
+  // 新行首必須是 L2 marker（㈠-㈩ 或 （一）/(一)）
+  if (!/^[\u3220-\u3229（(]/.test(newLine)) return false;
+  // 括弧形式 (X) 要進一步確認括弧內是中文數字（而非英數）
+  if (/^[（(]/.test(newLine) && !/^[（(]\s*[一二三四五六七八九十百零〇]+\s*[）)]/.test(newLine)) {
+    return false;
+  }
+  // 前段尾是 reference particle
+  return _INLINE_REF_TAIL_RE.test(paraText.slice(-1));
+}
+
 function _looksLikeMCPHardBreakedName(paraText, newLine) {
   if (!paraText) return false;
-  if (!/^[一二三四五六七八九]\s*[、．.]/.test(newLine)) return false;
+  // 放寬：1-4 位 CJK 數字 + 、/．/. — 涵蓋「一-九」「十」「十三」「二十」「百零一」等
+  if (!/^[一二三四五六七八九十百零〇]{1,4}\s*[、．.]/.test(newLine)) return false;
   const tail3 = paraText.slice(-3);
   if (tail3.length < 2) return false;
   // 尾 2-3 字須全為常見漢字（CJK Unified Ideographs）— 擋掉標點 / 英數 / 全半形空白
   if (!/^[\u4e00-\u9fff]+$/.test(tail3)) return false;
+  return true;
+}
+
+// 司法院 .text-pre hard-break 檢測 guard（統一判斷 invariant）：
+// 司法院 `.text-pre` 每 ~26 字強制插 `\n`（hard-break）、不考慮語意邊界。
+// 實證 103 訴 5 號 facts 段：110 行中 72 行恰好 26 字、95% 行 ≥ 25 字。
+//
+// 判斷原則：
+//   - prev rawLine 長 ≥ 22 字 + 無句末標點 → **幾乎必是 hard-break**、current 是續行
+//     （即使 current 以 outline marker 起頭也是假片段、如「如附表編號\n十三、十四所示」）
+//   - prev rawLine 短（< 22 字）或含句末標點（。；？！」』）→ **semantic break**、current 是真 outline
+//
+// 這是「反」判斷：guard 返回 true = current 不是真 outline、應合併回前段。
+// 與既有 _looksLikeMCPHardBreakedName / _looksLikeInlineL2Ref 形成多層防護：
+//   - 舊 guard：根據 tail 內容（CJK 字 / particle）判斷
+//   - 本 guard：根據 prev LINE LENGTH + 結尾標點判斷（更 robust invariant）
+//
+// 實例：
+//   - 103 訴 5 號「十三、十四」prev 行 26 字無標點 → 合併（正解）
+//   - 428 號「㈠」「(二)」prev 行短且句末標點 → 不合併、保留 outline
+//   - 合法 L1「二、認定犯罪事實」prev 行以「。」結尾 → 不合併
+// 句末/分段結尾 punct：包含冒號（「如下：」「下述：」常後接 outline list）+ ……
+const _SENTENCE_END_RE = /[。；？！：:」』）)…]$/;
+const _MCP_HARDBREAK_MIN_LEN = 22;  // 司法院 hard-break 典型 25-28 字，給 22 為保守閾值
+
+function _isMCPHardBreakContinuation(rawPrevLine, trimmedCurLine) {
+  if (!rawPrevLine) return false;
+  // current 必須以 outline marker 起頭（不然 guard 無意義）
+  if (!_isOutlineStart(trimmedCurLine)) return false;
+  // prev rawLine 原長 + 結尾判定（不 trim、使用原 length）
+  const rawPrev = rawPrevLine.replace(/\s+$/, '');  // 只去尾端空白、保前端
+  if (rawPrev.length < _MCP_HARDBREAK_MIN_LEN) return false;
+  if (_SENTENCE_END_RE.test(rawPrev)) return false;
   return true;
 }
 
@@ -5751,11 +5887,39 @@ function _extractMarker(text, level) {
   return [m[0], text.slice(m[0].length)];
 }
 
+// 固定「必斷」pattern → 強制注入 \n\n 當段落邊界。用來解：
+//   (1) 刑事判決結尾「判決如主文。\n本案經檢察官X到庭執行職務」應兩段（4.8% 判決）
+//   (2) 「略以：\n㈠...」「辯稱：\n㈠...」等聲明 intro 後接 L2 marker、應兩段
+// 保留原始 \n 後立即注入 \n、讓 Pass 1 line-split + 空行段落邊界自然生效。
+// 純 text 替換、不影響 offset（charOffset 對 text 的相對位置仍準確）。
+const _PARA_BREAK_BEFORE_PATTERNS = [
+  // 刑事判決結尾：本案經檢察官X到庭（執行）職務
+  // 前置 \n 確保只替換行首 position、避免誤拆句中
+  [/\n(本案經檢察官[\u4e00-\u9fff\s]{0,25}?(?:到庭|執行)(?:職務|過程)?)/g, '\n\n$1'],
+];
+const _PARA_BREAK_AFTER_PATTERNS = [
+  // 「略以：/主張略以：/陳稱：/辯稱：/則以：」+ \n + L2 marker → 後接新段
+  [/(略[以謂稱]|陳稱|辯稱|則以)：\n(?=[\u3220-\u3229（(])/g, '$1：\n\n'],
+];
+
+function _forceParagraphBreaks(text) {
+  let result = text;
+  for (const [pat, repl] of _PARA_BREAK_BEFORE_PATTERNS) {
+    result = result.replace(pat, repl);
+  }
+  for (const [pat, repl] of _PARA_BREAK_AFTER_PATTERNS) {
+    result = result.replace(pat, repl);
+  }
+  return result;
+}
+
 // 把原始文字解析為結構化段落陣列：[{ level: -1|0|1|2|3|4|5|null, text, offset }]
 // 經過四遍：行合併（引號感知）→ 子項拆分（L0-L5）→ 軟斷行 → 裸標記合併
 // formatJudgmentText、buildOutline 皆使用此 helper，確保主區段落與 outline 標記一致
 function parseJudgmentParagraphs(text) {
   if (!text) return [];
+  // Pre-process：對已知「必斷」pattern 注入 \n\n 強制段落邊界
+  text = _forceParagraphBreaks(text);
   const lines = text.split('\n');
   const paragraphs = []; // { level: -1|0|1|2|null, text: string, offset: number }
   let currentPara = null;
@@ -5803,6 +5967,8 @@ function parseJudgmentParagraphs(text) {
     }
   };
 
+  // 追蹤上一行 raw（未 trim）內容、用於 _isMCPHardBreakContinuation guard 判斷行長 + 結尾
+  let prevRawLine = '';
   for (const rawLine of lines) {
     // 每行開頭檢查 quote force-close 條件
     if (quoteDepth > 0 && quoteOpenOffset >= 0) {
@@ -5822,6 +5988,7 @@ function parseJudgmentParagraphs(text) {
         paragraphs.push(currentPara); currentPara = null;
       }
       charOffset += rawLine.length + 1;
+      prevRawLine = rawLine;
       continue;
     }
 
@@ -5837,6 +6004,7 @@ function parseJudgmentParagraphs(text) {
         currentPara = { level: 'table', text: rawLineKept, offset: charOffset };
       }
       charOffset += rawLine.length + 1;
+      prevRawLine = rawLine;
       continue;
     }
 
@@ -5862,7 +6030,23 @@ function parseJudgmentParagraphs(text) {
       currentPara.level !== 0 && currentPara.level !== -1 &&
       _looksLikeMCPHardBreakedName(currentPara.text, trimmed);
 
-    if (quoteDepth === 0 && (_isOutlineStart(trimmed) || isPuaContinuation) && !_maybeHardBreakedName) {
+    // Inline L2 reference guard：前段尾 particle + 新行 L2 marker → 續行
+    // 例：「犯罪事實一之」+「㈠所示罪刑項下」應合併、不切新 L2 outline
+    const _maybeInlineL2Ref =
+      quoteDepth === 0 && currentPara &&
+      currentPara.level !== 'table' && currentPara.level !== -1 &&
+      _looksLikeInlineL2Ref(currentPara.text, trimmed);
+
+    // MCP hard-break guard（統一 invariant）：
+    // 前一行 rawLine 長 ≥ 22 + 無句末標點 → 幾乎必是 26 字硬斷、current 的 outline marker
+    // 是假片段（續行）。不限 L1/L2、L0-L5 全適用（除 section header）。
+    const _maybeHardBreakContinuation =
+      quoteDepth === 0 && currentPara &&
+      currentPara.level !== 'table' && currentPara.level !== -1 &&
+      _isMCPHardBreakContinuation(prevRawLine, trimmed);
+
+    if (quoteDepth === 0 && (_isOutlineStart(trimmed) || isPuaContinuation)
+        && !_maybeHardBreakedName && !_maybeInlineL2Ref && !_maybeHardBreakContinuation) {
       // 遇到層級標記 = 新段落（僅在 quote 外判斷）
       if (currentPara) paragraphs.push(currentPara);
       const level = isPuaContinuation ? 2 : _getOutlineLevel(trimmed);
@@ -5900,6 +6084,7 @@ function parseJudgmentParagraphs(text) {
       updateQuote(trimmed, '');
     }
     charOffset += rawLine.length + 1;
+    prevRawLine = rawLine;
   }
   if (currentPara) paragraphs.push(currentPara);
 

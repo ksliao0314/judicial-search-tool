@@ -120,3 +120,61 @@ def test_multiple_kinds_flagged():
     )
     assert 'party_claim_prefix' in kinds
     assert 'main_text_leak' in kinds
+
+
+class TestChargeImpositionLeak:
+    """刑事判決「論罪/罪數/量刑」誤選偵測。"""
+
+    def test_charge_application_detected(self):
+        """典型論罪語句：「核被告X所為，均係犯刑法第Y條」"""
+        kinds = detect_anomaly_kinds(
+            excerpt='核被告C○○（如附表一共9罪、附表二共5罪）所為，均係犯刑法第339條第1項詐取財罪',
+            score=7, main_text=None,
+        )
+        assert 'charge_imposition_leak' in kinds
+
+    def test_applicable_law_detected(self):
+        """「應依刑法第X條論處」"""
+        kinds = detect_anomaly_kinds(
+            excerpt='是被告所為，應依刑法第339條第1項論處。',
+            score=6, main_text=None,
+        )
+        assert 'charge_imposition_leak' in kinds
+
+    def test_one_crime_rule_detected(self):
+        """罪數認定：「應以一罪論」「數罪併罰」「從一重論處」"""
+        for ex in [
+            '應以一罪論',
+            '被告所犯數罪，應依刑法第51條數罪併罰',
+            '應從一重論處詐欺取財罪',
+            '為想像競合犯',
+        ]:
+            kinds = detect_anomaly_kinds(excerpt=ex, score=5, main_text=None)
+            assert 'charge_imposition_leak' in kinds, f'失誤：{ex!r} 沒被偵測'
+
+    def test_sentencing_detected(self):
+        """量刑：「爰以行為人之責任」「爰審酌被告」「量處有期徒刑」"""
+        for ex in [
+            '爰以行為人之責任為基礎，審酌被告之犯罪動機',
+            '爰審酌被告犯罪後坦承犯行',
+            '爰依刑法第57條各款所列情狀',
+            '量處有期徒刑一年',
+        ]:
+            kinds = detect_anomaly_kinds(excerpt=ex, score=7, main_text=None)
+            assert 'charge_imposition_leak' in kinds, f'失誤：{ex!r} 沒被偵測'
+
+    def test_element_reasoning_not_flagged(self):
+        """構成要件認定段不該被誤判（即使含「犯罪」「被告」字樣）。"""
+        ok_cases = [
+            '本院認為被告具有為自己不法所有之意圖，主觀要件成立',
+            '查被告施用詐術，使被害人陷於錯誤而交付財物，客觀要件該當',
+            '本院審酌全案事證，被告辯解不足採信',  # 「審酌」但不是「爰審酌」
+        ]
+        for ex in ok_cases:
+            kinds = detect_anomaly_kinds(excerpt=ex, score=8, main_text=None)
+            assert 'charge_imposition_leak' not in kinds, f'誤判：{ex!r}'
+
+    def test_empty_excerpt_no_flag(self):
+        assert 'charge_imposition_leak' not in detect_anomaly_kinds(
+            excerpt='', score=0, main_text=None,
+        )
