@@ -1118,8 +1118,11 @@ document.getElementById('main-text-input').addEventListener('keydown', e => {
 });
 
 async function handleSearch() {
-  const kw = document.getElementById('main-search').value.trim();
-  if (!kw) { document.getElementById('main-search').focus(); return; }
+  const input = document.getElementById('main-search');
+  const kw = input.value.trim();
+  if (!kw) { input.focus(); return; }
+  // 按下搜尋即清空 input（下一次可直接接新搜尋、避免舊關鍵字殘留誤觸）
+  input.value = '';
   // 永遠展開（法條變體 + 已批准同義詞），不彈預覽 modal
   return runKeywordSearch(kw);
 }
@@ -2930,6 +2933,27 @@ document.addEventListener('keydown', e => {
 
 // ─── State A: Narrow + AI 分析指令 ──────────────────
 
+// AI 分析指令 draft 持久化（per-task）：律師沒按分析就關卡片/跳頁，下次回來輸入還在
+const _QUESTION_DRAFT_KEY = (tid) => `card_question_draft_${tid}`;
+function _loadQuestionDraft(tid) {
+  if (!tid) return '';
+  try { return localStorage.getItem(_QUESTION_DRAFT_KEY(tid)) || ''; } catch { return ''; }
+}
+function _saveQuestionDraft(tid, text) {
+  if (!tid) return;
+  try {
+    if (text) localStorage.setItem(_QUESTION_DRAFT_KEY(tid), text);
+    else localStorage.removeItem(_QUESTION_DRAFT_KEY(tid));
+  } catch {}
+}
+function _clearQuestionDraft(tid) { _saveQuestionDraft(tid, ''); }
+
+// 一次性綁 input listener（renderCardNarrow 被呼叫多次、避免重複綁）
+document.getElementById('card-question')?.addEventListener('input', (e) => {
+  if (!state.card?.taskId) return;
+  _saveQuestionDraft(state.card.taskId, e.target.value);
+});
+
 function renderCardNarrow() {
   renderCardKeywordChip();
   renderCardTierChips();
@@ -2956,7 +2980,8 @@ function renderCardNarrow() {
 
   // Reset question, facts toggle, and reasoning filter（reasoning filter 下方會
   // fetch prefilter-result 恢復跑中/完成狀態 — reset 只是給無 prefilter 的 task 一個 baseline）
-  document.getElementById('card-question').value = '';
+  // 分析指令改從 localStorage 恢復 draft（per-task）— 律師沒送分析就跳頁、回來原文還在
+  document.getElementById('card-question').value = _loadQuestionDraft(state.card.taskId);
   document.getElementById('card-read-facts').checked = false;
   const reasonBtn = document.getElementById('card-reasoning-toggle');
   reasonBtn.dataset.active = 'false';
@@ -3564,6 +3589,8 @@ document.getElementById('card-submit-analyze').addEventListener('click', async (
     });
     if (!res.ok) throw new Error(await res.text());
     const { analysis_id } = await res.json();
+    // 分析成功送出 → 清掉 draft（該題已進 DB 成 analyses row）
+    _clearQuestionDraft(state.card.taskId);
     state.card.analysisId = analysis_id;
     state.primaryAnalysisId = analysis_id;
     state.card.progress = 0;
