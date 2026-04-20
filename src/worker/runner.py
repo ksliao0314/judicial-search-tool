@@ -589,9 +589,11 @@ async def _recover_new_task(task: dict, sp: dict) -> None:
 _STAGE_CONCURRENCY = 3
 _stage_sem: asyncio.Semaphore | None = None
 
-# Worker timeout：60 分鐘（律師最大 task ~5000 筆精讀可能 30-60 分，保留 headroom）。
-# 超過 timeout 視為卡死 → cancel work → 釋放 sem slot → 讓後續 task 有機會跑。
-_WORK_TIMEOUT_SEC = 60 * 60
+# Worker timeout：4 小時（律師最大 task ~1000 筆精讀需 40-90 分、多任務競爭 rate limit
+# 可能拉到 2-3 小時、4 hr 是保守 ceiling 防真 stuck 占 slot）。
+# Stage3 timeout 時會走 graceful abort path（見 dispatch_work 的 TimeoutError handler）、
+# 產 partial synthesis 給律師救回已分析結果；其他 stage timeout 維持原 mark failed 行為。
+_WORK_TIMEOUT_SEC = 4 * 60 * 60
 
 # 活躍 work registry — 供 /api/debug/workers 查詢、kill-worker endpoint 找 target。
 # Key = 自動生成的 work_id (uuid)；Value = {task_id, type, started_at, task_obj}。
@@ -797,12 +799,31 @@ async def dispatch_work(work: "WorkItem") -> None:
             await asyncio.wait_for(_execute_work(work), timeout=_WORK_TIMEOUT_SEC)
         except asyncio.TimeoutError:
             # Timeout 觸發 inner cancel → _execute_work 的 CancelledError handler
-            # 已做 notify_work_cancelled（mark failed + SSE）。外層只需 log。
+            # 已做 notify_work_cancelled（mark failed + SSE）。
             task_id = getattr(work, "task_id", "?")
             logger.error(
                 "[%s] work %s (%s) 超時 %d 秒，已強制中止",
                 task_id, work_id, work.type, _WORK_TIMEOUT_SEC,
             )
+            # Stage3 timeout 特殊處理：已有 ≥3 match 的話、把 status=failed 改寫成 partial、
+            # 並 fire partial synthesis；律師還能看到已分析的結果、可以 /resume 補齊或 /finalize
+            # （見設計決策：timeout 不應該讓律師白白失去已分析的資料）
+            if isinstance(work, Stage3AnalyzeWork):
+                try:
+                    a_now = await db.get_analysis(work.analysis_id) or {}
+                    match_count = int(a_now.get("match_count", 0) or 0)
+                    if match_count >= 3:
+                        logger.info("[%s] Stage3 timeout recovery: match=%d ≥ 3、fire partial synthesis",
+                                    task_id, match_count)
+                        request_graceful_abort(work.analysis_id)  # _fire_abort_partial_synthesis 會 self-check
+                        asyncio.create_task(_fire_abort_partial_synthesis(
+                            analysis_id=work.analysis_id,
+                            task_id=work.task_id,
+                            question=work.question,
+                            api_key=work.api_key,
+                        ))
+                except Exception as exc:
+                    logger.warning("[%s] Stage3 timeout recovery 失敗：%s", task_id, exc)
         finally:
             _active_workers.pop(work_id, None)
 
@@ -1877,8 +1898,7 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
             "results": batch_results_data,
         }
         if usage:
-            event["usage"] = usage   # {scoring_input, scoring_output} 累積值
-            # 把本 run 這批新增的 scoring tokens 以 delta 形式寫入 DB，
+            # 先把本 run 這批新增的 scoring tokens 以 delta 形式寫入 DB，
             # 供 preliminary / final / 手動升格 讀取總成本
             try:
                 cur_in  = int(usage.get("scoring_input", 0) or 0)
@@ -1891,6 +1911,18 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
                     _scoring_persisted["output"] = cur_out
             except Exception as exc:
                 logger.warning("[%s] increment_scoring_tokens 失敗（不影響主流程）：%s", task_id, exc)
+            # SSE payload 的 usage 用 DB 累積值、不是 local run counter。
+            # 原因：resume 時新 run_analysis_v2 invocation 的 _total_input_tokens 從 0 起算、
+            # 若 SSE 回傳 local 值、前端 ticker 會看到「跨 resume token 歸零」。
+            # 用 DB 累積值就能忠實顯示「從一開始到現在總共花了多少」。
+            try:
+                a_updated = await db.get_analysis(analysis_id) or {}
+                event["usage"] = {
+                    "scoring_input":  int(a_updated.get("scoring_input_tokens",  0) or 0),
+                    "scoring_output": int(a_updated.get("scoring_output_tokens", 0) or 0),
+                }
+            except Exception:
+                event["usage"] = usage  # fallback 用 local（仍比 None 好）
         await sse_bus.publish(task_id, "batch_done", event)
 
     async def _do_fetch():

@@ -5319,6 +5319,44 @@ function _evaluateBlockAndPush(block, result, tailParagraphs) {
   result.push(...block);
 }
 
+// 跨段落追蹤引號開合、把「同一對『「」』裡被硬斷的 outline marker」merge 回前段
+// 解決 pattern（實例 105 訴 1766 委員四陳述）：
+//   司法院 HTML 在同一個引文 `「...（四）...（五）...（六）」` 中每項前有 `\n`，
+//   MCP 照 newline 切段 → 後段開頭為 outline marker `（五）` → _buildQuoteMask 單段判斷、
+//   跨段 quote state 丟失 → 誤認為真 outline。
+//
+// 邏輯：從頭到尾掃一次、維護 openQuotes 計數（「 +1、」 -1）。在 openQuotes>0 狀態下
+// 碰到 L1-L5 outline marker、直接 merge 回前段。
+//
+// 保護：連續 MAX_QUOTE_SPAN=5 段未收口就 bail out（防 parser 對不齊導致整份 merge 失控）。
+function _unsplitInsideUnclosedQuote(paragraphs) {
+  const MAX_QUOTE_SPAN = 5;
+  const result = [];
+  let openQuotes = 0;
+  let spanCount = 0;
+  for (const p of paragraphs) {
+    const wasInQuote = openQuotes > 0 && spanCount < MAX_QUOTE_SPAN;
+    const opens = (p.text.match(/「/g) || []).length;
+    const closes = (p.text.match(/」/g) || []).length;
+    const canMerge = typeof p.level === 'number' && p.level >= 1 && p.level <= 5;
+    if (wasInQuote && canMerge) {
+      const prev = result[result.length - 1];
+      if (prev && (typeof prev.level === 'number' || prev.level === null)) {
+        prev.text = prev.text + p.text;
+        openQuotes += (opens - closes);
+        if (openQuotes <= 0) { openQuotes = 0; spanCount = 0; }
+        else spanCount += 1;
+        continue;
+      }
+    }
+    result.push(p);
+    const newOpen = openQuotes + (opens - closes);
+    if (newOpen <= 0) { openQuotes = 0; spanCount = 0; }
+    else { openQuotes = newOpen; spanCount = wasInQuote ? spanCount + 1 : 1; }
+  }
+  return result;
+}
+
 function _unsplitCitedArticleClauses(paragraphs) {
   const result = [];
   let i = 0;
@@ -5877,10 +5915,14 @@ function parseJudgmentParagraphs(text) {
   //   - block 內含 L2/L3/L4/L5 巢狀標記：保留（引文罕見有巢狀結構、幾乎必為真 outline）
   const afterCitationUnsplit = _unsplitCitedArticleClauses(afterSubSplit);
 
+  // 第 2.6 遍：跨段落 quote state 復原 — 在未收口的 「」 裡的 outline marker merge 回前段
+  // （L1-L5 全層、補 _unsplitCitedArticleClauses 的 L1-only 限制）
+  const afterQuoteUnsplit = _unsplitInsideUnclosedQuote(afterCitationUnsplit);
+
   // 第三遍：軟斷行 — 無階層標記的長段，於句號 + 判決常用轉折詞處斷開
   // 只處理 level=null 的普通段落；有階層（0-5）、section header 不動
   const splitParagraphs = [];
-  for (const p of afterCitationUnsplit) {
+  for (const p of afterQuoteUnsplit) {
     if (p.level !== null || p.text.length < _SOFT_WRAP_MIN_LEN) {
       splitParagraphs.push(p); continue;
     }
