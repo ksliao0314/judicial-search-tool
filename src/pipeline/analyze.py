@@ -185,12 +185,33 @@ ANALYSIS_PROMPT_V2 = ("""\
     · 填 "中性"
   - 若無法判斷 → "中性"
 
+**excerpt 選取規則（重要）**：
+excerpt 必須是**法院自己的判斷/論理段落**（「本院認為/本院查/本院見解/本院認定/本院判斷/本院核閱」等由法院說話的段落）。
+
+**禁止來源**（即使該段文字看起來很命中）：
+  - 【主文】— 只是判決結果、律師已知、無新訊息
+  - 「原告主張/起訴略以/原告抗辯/原告陳述」— 當事人立場、非法院判斷
+  - 「被告答辯/被告抗辯/被告辯稱/被告略以」— 同上
+  - 證人證述、鑑定報告引文 — 證據不是法院的判斷
+  - 法院**複述**當事人論點的句子（即使所在段落以「本院查」開頭、若內容在重述當事人、仍不算）
+
+**「按…規定」「經查…」開頭詞不可當判準** — 當事人陳述也常這樣寫。
+判準是「這段話**所在的 section 是不是法院在說話、且法院在表達自己的見解**」。
+
+**「固非無見」特別 pattern**（律師研究極重要）：
+若判決中出現「原審…固非無見」「上訴意旨固非無據」「被告所辯尚非無據」等句式、
+這是**法院承認對方有理但即將反駁**的信號。excerpt **必須取此句之後**的法院反駁段落
+（通常以「然」「然則」「然查」「惟」「但」銜接）— 上級審推翻下級審、或法院反駁
+當事人論點的核心推理、律師最在意的內容。
+
+若整份判決找不到法院判斷段落（極罕見、如某些簡易裁定）、excerpt 留空字串。
+
 請只回傳 JSON，不要任何其他文字：
 {{
   "score": 0到10的整數,
   "direction": "支持" | "反對" | "中性",
   "position": "法院的立場/認定，60字內；若 score=0 留空字串",
-  "excerpt": "命中的核心段落原文（必須從判決原文逐字複製，不得改寫或摘要），150字內；若 score=0 留空字串",
+  "excerpt": "法院判斷段落的原文（必須從判決原文逐字複製，不得改寫或摘要），150字內；若 score=0 或找不到法院判斷段落留空字串",
   "found_in": "excerpt 所在的段落類型：reasoning / facts / main_text / cited_statutes",
   "variant_candidates": []
 }}""" + _V2_SUFFIX)
@@ -1347,19 +1368,43 @@ async def run_analysis_v2(
                             bucket[cs] = bucket.get(cs, 0) + 1
 
             # score=0 且 excerpt 為空：用搜尋關鍵字從全文截取上下文（零 LLM cost）
+            # P2-4 加 section filter：若 keyword 出現位置前 500 字內有「主張/抗辯/答辯 section
+            # marker」且之後沒有「本院…」marker、代表該位置仍在當事人立場段內、放棄這個 window
+            # （跟 Claude 路徑一致：excerpt 不該從當事人主張段挑）
             if score == 0 and not excerpt and search_keywords:
                 text = (judgment.get("reasoning") or judgment.get("full_text") or "")
                 for kw in search_keywords:
                     pos = text.find(kw)
-                    if pos >= 0:
-                        start = max(0, pos - 30)
-                        end = min(len(text), pos + len(kw) + 50)
-                        snippet = text[start:end].replace('\n', ' ').strip()
-                        if start > 0: snippet = '…' + snippet
-                        if end < len(text): snippet = snippet + '…'
-                        excerpt = snippet[:120]
-                        break
+                    if pos < 0:
+                        continue
+                    # 往前看 500 字、check 是否在當事人主張 section 內
+                    lookback_start = max(0, pos - 500)
+                    lookback = text[lookback_start:pos]
+                    party_markers = ['原告主張', '原告起訴', '原告略以', '原告抗辯',
+                                     '被告答辯', '被告抗辯', '被告略以', '被告辯稱',
+                                     '上訴人主張', '抗告人主張']
+                    court_markers = ['本院認為', '本院查', '本院見解', '本院認定', '本院判斷']
+                    last_party  = max((lookback.rfind(m) for m in party_markers), default=-1)
+                    last_court  = max((lookback.rfind(m) for m in court_markers), default=-1)
+                    if last_party > last_court:
+                        continue  # 這個 kw 落在當事人 section、換下個 kw
+                    start = max(0, pos - 30)
+                    end = min(len(text), pos + len(kw) + 50)
+                    snippet = text[start:end].replace('\n', ' ').strip()
+                    if start > 0: snippet = '…' + snippet
+                    if end < len(text): snippet = snippet + '…'
+                    excerpt = snippet[:120]
+                    break
 
+            # Log excerpt quality anomalies（非阻塞、不 re-pick、一週後 review 決定要不要加後處理）
+            try:
+                from src.utils.excerpt_anomaly_log import log_excerpt_anomaly
+                await log_excerpt_anomaly(
+                    case_id=case_id, analysis_id=analysis_id, score=score,
+                    excerpt=raw_excerpt, main_text=judgment.get("main_text"),
+                )
+            except Exception:
+                pass
             return {"case_id": case_id, "match": match, "score": score,
                     "excerpt": excerpt, "reason": position}
 
