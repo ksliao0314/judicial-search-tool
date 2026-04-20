@@ -23,7 +23,9 @@ async function pollWorkersOnce() {
 
 // State B 的卡住警告：距離上次 SSE 進度事件（batch_done）超過 STALL_THRESHOLD 秒
 // → 顯示紅字警告。只看「單次 gap」、不累加；task 重啟 / batch 完成都會把 gap 歸零
-const _STALL_THRESHOLD = 60;  // 秒
+// 實證：單筆 3-retry worst-case ~52s、rate_limit 首次 backoff 30s、尾段 1-2 筆殘留
+// 常有 30-50s gap。對齊紅燈 90s 避免雙重警告。
+const _STALL_THRESHOLD = 90;  // 秒
 let _lastProgressAt = 0;
 
 function markProgressReceived() {
@@ -1117,6 +1119,99 @@ document.getElementById('main-text-input').addEventListener('keydown', e => {
   if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) handleSearch();
 });
 
+// 首頁進階篩選：年度 slider（預設 民國 75-當前年）+ 收合 toggle
+// 狀態用 module-level 變數、不塞 state.home 避免與既有 state 結構衝突
+const _HOME_YEAR_DEFAULT_MIN = 75;
+const _HOME_YEAR_DEFAULT_MAX = (() => {
+  const g = new Date().getFullYear() - 1911;
+  return Math.max(_HOME_YEAR_DEFAULT_MIN, g);  // 當前民國年、至少 75
+})();
+const _homeYear = {
+  from: _HOME_YEAR_DEFAULT_MIN,
+  to: _HOME_YEAR_DEFAULT_MAX,
+};
+
+function _homeYearIsActive() {
+  return _homeYear.from > _HOME_YEAR_DEFAULT_MIN || _homeYear.to < _HOME_YEAR_DEFAULT_MAX;
+}
+
+function _updateHomeYearUI() {
+  const fromInp = document.getElementById('home-year-from');
+  const toInp   = document.getElementById('home-year-to');
+  const track   = document.getElementById('home-year-track');
+  const label   = document.getElementById('home-year-label');
+  if (!fromInp || !toInp || !track || !label) return;
+  const span = _HOME_YEAR_DEFAULT_MAX - _HOME_YEAR_DEFAULT_MIN;
+  const leftPct  = ((_homeYear.from - _HOME_YEAR_DEFAULT_MIN) / span) * 100;
+  const rightPct = ((_HOME_YEAR_DEFAULT_MAX - _homeYear.to) / span) * 100;
+  track.style.left  = leftPct + '%';
+  track.style.right = rightPct + '%';
+  label.textContent = _homeYearIsActive()
+    ? `${_homeYear.from} — ${_homeYear.to}`
+    : `全部 ${_HOME_YEAR_DEFAULT_MIN}-${_HOME_YEAR_DEFAULT_MAX}`;
+  _updateHomeAdvancedCount();
+}
+
+function _updateHomeAdvancedCount() {
+  const cnt = document.getElementById('home-advanced-count');
+  if (!cnt) return;
+  const mainText = document.getElementById('main-text-input')?.value.trim() || '';
+  let active = 0;
+  if (mainText) active++;
+  if (_homeYearIsActive()) active++;
+  if (active > 0) {
+    cnt.classList.remove('hidden');
+    cnt.textContent = `· ${active} 個條件`;
+  } else {
+    cnt.classList.add('hidden');
+    cnt.textContent = '';
+  }
+}
+
+function _setupHomeAdvancedPanel() {
+  // Slider init — 兩個 input 用 CSS pointer-events:none、只有 thumb（.range-thumb::-webkit-slider-thumb）
+  // 接事件、避免上層 input 截斷下層 input 的 thumb 互動（跟 Stage 2 card-year 同 pattern）
+  const fromInp = document.getElementById('home-year-from');
+  const toInp   = document.getElementById('home-year-to');
+  if (fromInp && toInp) {
+    fromInp.min = toInp.min = String(_HOME_YEAR_DEFAULT_MIN);
+    fromInp.max = toInp.max = String(_HOME_YEAR_DEFAULT_MAX);
+    fromInp.value = String(_homeYear.from);
+    toInp.value = String(_homeYear.to);
+    const onInput = (which) => {
+      let from = parseInt(fromInp.value, 10);
+      let to   = parseInt(toInp.value, 10);
+      // 至少間隔 1 年（跟 Stage 2 onCardYearInput 同邏輯）
+      if (which === 'from' && from >= to) { from = to - 1; fromInp.value = String(from); }
+      if (which === 'to'   && to <= from) { to = from + 1; toInp.value = String(to); }
+      _homeYear.from = from;
+      _homeYear.to = to;
+      _updateHomeYearUI();
+    };
+    fromInp.addEventListener('input', () => onInput('from'));
+    toInp.addEventListener('input', () => onInput('to'));
+    _updateHomeYearUI();
+  }
+  // 主文 input 變更同步 count
+  document.getElementById('main-text-input')?.addEventListener('input', _updateHomeAdvancedCount);
+  // Toggle
+  const toggleBtn = document.getElementById('btn-home-advanced-toggle');
+  const panel = document.getElementById('home-advanced-panel');
+  const chevron = document.getElementById('home-advanced-chevron');
+  toggleBtn?.addEventListener('click', () => {
+    if (!panel) return;
+    const isOpen = !panel.classList.contains('hidden');
+    if (isOpen) {
+      panel.classList.add('hidden');
+      if (chevron) chevron.style.transform = '';
+    } else {
+      panel.classList.remove('hidden');
+      if (chevron) chevron.style.transform = 'rotate(90deg)';
+    }
+  });
+}
+_setupHomeAdvancedPanel();
+
 async function handleSearch() {
   const input = document.getElementById('main-search');
   const kw = input.value.trim();
@@ -1143,16 +1238,20 @@ function _task_search_domain() {
 
 function runKeywordSearch(keyword, opts = {}) {
   const domain = getCurrentSearchDomain();
-  // 憲法解釋模式：沒 main_text / exhaustive / expand_keywords 語意
+  // 憲法解釋模式：沒 main_text / exhaustive / expand_keywords / year 語意
   const mainText = domain === 'interpretation'
     ? null
     : (document.getElementById('main-text-input')?.value.trim() || null);
+  // 年份 filter 只對 judgment mode 生效；未拖動 slider（仍為預設區間）則不傳
+  const yearActive = domain === 'judgment' && _homeYearIsActive();
   return createAndRunTask({
     keyword,
     search_domain: domain,
     expand_keywords: domain === 'judgment',
     exhaustive: domain === 'judgment',
     main_text: mainText,
+    year_from: yearActive ? _homeYear.from : null,
+    year_to: yearActive ? _homeYear.to : null,
     original_keyword: opts.originalKeyword || keyword,
   });
 }
@@ -2804,6 +2903,8 @@ function closeSearchCard() {
   state.card.open = false;
   // 清掉 pending final refresh：下次律師重開卡片會 reloadAnalyses fetch 最新 synthesis
   state.card._pendingFinalRefresh = null;
+  // 停 SSE 漏接 safety poll
+  _stopFinalSafetyPoll();
   // 中止中 UI（timer + 強制結束按鈕）也清、避免 DOM 殘留影響下次開卡
   _clearAbortUI();
   // API 錯誤 banner 也清（下次開新 task 重新偵測）
@@ -3757,9 +3858,13 @@ function renderCardProgress(question) {
         agoEl2.className = 'text-[10px] font-mono';
       } else {
         const sec = Math.round((now - state.card._lastFeedTime) / 1000);
-        if (sec < 15) {
+        // 閾值依 log 實證調整（2026-04-20）：
+        //   綠 < 30s — 正常、涵蓋短 retry（JSONDecodeError 1-7s backoff）+ Round 2 full-pass
+        //   黃 30-89s — 回應較慢、可能 retry burst 或 rate_limit 首次 backoff
+        //   紅 ≥ 90s — API 無回應、對應 rate_limit 第二次 backoff 以上
+        if (sec < 30) {
           agoEl2.innerHTML = '<span class="text-emerald-500">●</span> <span class="text-warm-500">正常回應中</span>';
-        } else if (sec < 45) {
+        } else if (sec < 90) {
           agoEl2.innerHTML = `<span class="text-amber-500">●</span> <span class="text-amber-600">回應較慢（${sec}s）</span>`;
         } else {
           agoEl2.innerHTML = `<span class="text-red-500">●</span> <span class="text-red-600">API 無回應，系統自動重試（${sec}s）</span>`;
@@ -4289,6 +4394,14 @@ function renderCardSynthesis(synth, bannerInfo = null) {
   //   running → 「初步結果、仍在分析剩餘 N 筆」+ [就用現在結果定稿]
   //   partial → 「已中止於 X/Y（命中 K）」+ [繼續未完成的分析] + [就用現在結果定稿]
   // status ∈ {failed, cancelled, done} 一律不顯示（caller 在 bannerInfo 判斷時已剔除）
+  //
+  // SSE 漏接安全網：running / partial 時啟動 15s poll、偵測 backend 真完成但 FE 沒收到
+  // synthesis_done 的情境；bannerInfo=null（已定稿）或其他狀態停止 poll。
+  if (bannerInfo && (bannerInfo.status === 'running' || bannerInfo.status === 'partial')) {
+    _startFinalSafetyPoll(state.card.taskId, state.card.analysisId);
+  } else {
+    _stopFinalSafetyPoll();
+  }
   const synthContainer = document.getElementById('card-synthesis');
   let banner = document.getElementById('card-synth-preliminary-banner');
   if (bannerInfo) {
@@ -7060,6 +7173,64 @@ function closeReaderCard(skipHistory = false) {
     }
   }
   if (wasOpen && !skipHistory) history.back();
+}
+
+// ─── SSE 漏接安全網：狀態 polling
+// 背景：SSE 受 browser tab throttle / 網路 flap 影響、batch_done + stage3_synthesis_done
+// 偶爾漏接、banner 卡在「剩餘 N 筆」但 DB 已 done + preliminary=0。律師重開 card 才會看到定稿。
+// 補強：當 banner 處於 running / partial 狀態時、每 15s poll 一次 DB；若 DB 真 done
+// 卻 FE 沒更新、觸發等同 synthesis_done handler 的邏輯（全部 tab + reader 關 → 直接
+// re-render；否則設 _pendingFinalRefresh + 顯示「全部分析完成、點此更新」banner）。
+let _finalPollTimer = null;
+let _finalPollAnalysisId = null;
+const _FINAL_POLL_INTERVAL = 15000;
+
+function _stopFinalSafetyPoll() {
+  if (_finalPollTimer) {
+    clearInterval(_finalPollTimer);
+    _finalPollTimer = null;
+  }
+  _finalPollAnalysisId = null;
+}
+
+function _startFinalSafetyPoll(taskId, analysisId) {
+  if (!taskId || !analysisId) return;
+  // 若已在 poll 同一 analysis、不重啟；換 analysisId 則重啟
+  if (_finalPollTimer && _finalPollAnalysisId === analysisId) return;
+  _stopFinalSafetyPoll();
+  _finalPollAnalysisId = analysisId;
+  _finalPollTimer = setInterval(async () => {
+    // Guard：card 關閉 / 換 task / 離開 State C / 換 analysis → 停 poll
+    if (!state.card.open || state.card.taskId !== taskId
+        || state.card.state !== 'c' || state.card.analysisId !== analysisId) {
+      _stopFinalSafetyPoll();
+      return;
+    }
+    try {
+      const res = await apiFetch(API.task(taskId));
+      if (!res.ok) return;
+      const task = await res.json();
+      const a = (task.analyses || []).find(x => x.id === analysisId);
+      if (!a) return;
+      const dbDone = a.status === 'done' && !a.synthesis_is_preliminary;
+      if (!dbDone) return;  // 後端還沒完、繼續 poll
+      // 後端已完成、FE 卡在 running/partial banner → 事件漏接、觸發 pending refresh 流程
+      _stopFinalSafetyPoll();
+      await reloadAnalyses();
+      const readerOpen = !document.getElementById('reader-card').classList.contains('hidden');
+      const inSpecificView = state.card.activeCluster != null;
+      if (readerOpen || inSpecificView) {
+        state.card._pendingFinalRefresh = analysisId;
+        _showPendingFinalBanner();
+        renderAnalysisHistoryTabs();
+      } else {
+        await renderCardResults(analysisId);
+        renderAnalysisHistoryTabs();
+      }
+    } catch {
+      // Network error / 後端掛 → 安靜略過、下一輪再試
+    }
+  }, _FINAL_POLL_INTERVAL);
 }
 
 // ─── Pending final synthesis refresh（Option D：延後 re-render 避免打斷律師瀏覽）

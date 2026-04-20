@@ -64,6 +64,15 @@ class CreateTaskRequest(BaseModel):
                     "理由欄司法院 search 不支援，需 stage 2.5 深度篩選。"
                     "interpretation mode 無此欄位（釋字無主文結構）",
     )
+    year_from: int | None = Field(
+        default=None,
+        description="搜尋年度下限（民國年）— 對 MCP search 壓 server-side 篩選、有效減少 Stage 1 結果。"
+                    "interpretation mode 忽略（cons 離線索引無此篩選）。",
+    )
+    year_to: int | None = Field(
+        default=None,
+        description="搜尋年度上限（民國年）。",
+    )
     original_keyword: str | None = Field(
         default=None,
         description="使用者原始輸入（展開前），用於 UI 顯示。未提供時 fallback 到 keyword。",
@@ -101,6 +110,8 @@ async def create_task(
             "expand_keywords": body.expand_keywords,
             "exhaustive": body.exhaustive,
             "main_text": body.main_text,
+            "year_from": body.year_from,
+            "year_to": body.year_to,
             "original_keyword": body.original_keyword,
             "search_domain": body.search_domain,   # 冗餘存一份給 recovery 用
         },
@@ -112,6 +123,8 @@ async def create_task(
         expand_keywords=body.expand_keywords,
         exhaustive=body.exhaustive,
         main_text=body.main_text,
+        year_from=body.year_from,
+        year_to=body.year_to,
         api_key=x_api_key,
         search_domain=body.search_domain,
     )

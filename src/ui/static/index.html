@@ -175,13 +175,18 @@
 
         <!-- 進階列 -->
         <div class="flex items-center justify-between text-xs gap-4 mb-1.5">
-          <div id="home-filter-row" class="flex items-center gap-1.5 font-mono text-warm-400 min-w-0"
-               title="對應司法院「裁判主文」欄位（jud_jmain）— 進階篩選">
-            <label for="main-text-input" class="uppercase tracking-widest text-[10px] shrink-0">主文含</label>
-            <input id="main-text-input" type="text" placeholder="（選填）例：上訴駁回"
-                   class="w-44 bg-transparent border-b border-warm-200 text-xs font-serif text-ink
-                          focus:outline-none focus:border-ink placeholder-warm-300 py-0.5" />
-          </div>
+          <!-- 進階篩選收合按鈕（取代裸露的「主文含」input、把主文 + 年度都收進來）-->
+          <button id="btn-home-advanced-toggle" type="button"
+                  class="flex items-center gap-1 font-mono text-warm-400 hover:text-ink transition-colors uppercase tracking-widest text-[10px]">
+            <svg id="home-advanced-chevron" xmlns="http://www.w3.org/2000/svg"
+                 width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+                 stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"
+                 class="transition-transform">
+              <polyline points="9 18 15 12 9 6"/>
+            </svg>
+            進階篩選
+            <span id="home-advanced-count" class="hidden font-mono text-[10px] text-seal ml-1"></span>
+          </button>
           <button id="btn-search-help" class="shrink-0 flex items-center gap-1 text-warm-400 hover:text-seal transition-colors ml-auto">
             <svg xmlns="http://www.w3.org/2000/svg" width="13" height="13" viewBox="0 0 24 24" fill="none"
                  stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -190,6 +195,38 @@
             <span class="font-mono text-[10px]">搜尋說明</span>
           </button>
         </div>
+
+        <!-- 進階篩選（預設收合）— 主文含 / 年度滑桿 兩欄並排（憲法解釋模式年度欄隱藏）-->
+        <div id="home-advanced-panel" class="hidden mb-3 border-t border-warm-200 pt-3">
+          <div class="flex flex-wrap gap-x-6 gap-y-3 text-xs">
+            <!-- 主文含 -->
+            <div class="flex items-center gap-2 flex-1 min-w-[220px]"
+                 title="對應司法院「裁判主文」欄位（jud_jmain）">
+              <label for="main-text-input"
+                     class="font-mono text-[10px] uppercase tracking-widest text-warm-500 shrink-0">主文含</label>
+              <input id="main-text-input" type="text" placeholder="（選填）例：上訴駁回"
+                     class="flex-1 bg-transparent border-b border-warm-200 text-xs font-serif text-ink
+                            focus:outline-none focus:border-ink placeholder-warm-300 py-0.5 min-w-0" />
+            </div>
+            <!-- 年度 slider（介面對齊 Stage 2 視覺）-->
+            <div id="home-year-row" class="flex items-center gap-2 flex-1 min-w-[240px]">
+              <label class="font-mono text-[10px] uppercase tracking-widest text-warm-500 shrink-0">年度</label>
+              <div id="home-year-wrap" class="flex-1 flex items-center gap-2 min-w-0">
+                <div class="relative h-5 flex-1 min-w-0">
+                  <div class="absolute top-1/2 -translate-y-1/2 left-0 right-0 h-1 bg-warm-200 rounded-full">
+                    <div id="home-year-track" class="absolute h-full bg-seal/30 rounded-full"></div>
+                  </div>
+                  <input type="range" id="home-year-from"
+                         class="absolute inset-0 w-full appearance-none bg-transparent pointer-events-none range-thumb" />
+                  <input type="range" id="home-year-to"
+                         class="absolute inset-0 w-full appearance-none bg-transparent pointer-events-none range-thumb" />
+                </div>
+                <span id="home-year-label" class="font-mono text-[10px] text-ink whitespace-nowrap shrink-0"></span>
+              </div>
+            </div>
+          </div>
+        </div>
+
         <input type="checkbox" id="hdr-expand" checked class="hidden" />
 
         <!-- Restart recovery banner -->

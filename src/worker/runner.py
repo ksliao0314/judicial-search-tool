@@ -118,14 +118,15 @@ async def sync_synonym_seed_to_dict() -> None:
 class Stage1SearchWork:
     """Stage 1：純做 MCP search 寫 task_search_hits，不抓全文、不精讀。
 
-    不接受 court / case_type / year_* — stage 1 故意 cast wide，
-    這些條件改在 stage 2 由律師互動篩選後才壓給 stage 3。
+    court / case_type 不接受（Stage 2 互動篩選）、但 **year_from / year_to 接受**：
+    常見關鍵字（例如「詐欺」）若不限年度會撈到 5000+ 筆、MCP 500 上限切多輪仍很慢、
+    律師其實不需要 30 年前的判決。首頁進階篩選新增年度 slider 允許壓在 Stage 1 server-side。
 
     main_text：律師若已知主文措辭（如「被告應給付」「撤銷原處分」），可在此先壓 server-side
     篩選，比拿全部回來再 client filter 快很多。理由欄司法院 search 不支援，需 stage 2.5 深篩。
 
     search_domain：'judgment'（FJUD 判決）或 'interpretation'（釋字+憲判字）。後者走
-    不同 pipeline（`_run_stage1_search_interpretation`）—不展同義詞、不窮盡、不 main_text。
+    不同 pipeline（`_run_stage1_search_interpretation`）—不展同義詞、不窮盡、不 main_text、不 year。
     """
     type: str = field(default="stage1_search", init=False)
     task_id: str = ""
@@ -133,6 +134,8 @@ class Stage1SearchWork:
     expand_keywords: bool = True
     exhaustive: bool = True
     main_text: str | None = None
+    year_from: int | None = None
+    year_to: int | None = None
     api_key: str | None = None
     search_domain: str = "judgment"
 
@@ -525,6 +528,8 @@ async def _recover_new_task(task: dict, sp: dict) -> None:
             expand_keywords=sp.get("expand_keywords", True),
             exhaustive=sp.get("exhaustive", True),
             main_text=sp.get("main_text"),
+            year_from=sp.get("year_from"),
+            year_to=sp.get("year_to"),
         )
         asyncio.create_task(dispatch_work(work))
         logger.info("恢復新任務 %s stage 1", task["id"])
@@ -1363,7 +1368,8 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
         if work.exhaustive:
             await search_pipeline.run_search_exhaustive(
                 keyword=and_query,
-                court=None, case_type=None, year_from=None, year_to=None,
+                court=None, case_type=None,
+                year_from=work.year_from, year_to=work.year_to,  # 首頁進階篩選壓 server-side
                 max_total=remaining,
                 single_query=True,         # 整串原樣 → MCP/司法院 做 AND
                 on_round_done=on_round,    # 每 cursor round 完成立刻通知
@@ -1373,7 +1379,8 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
             # 非 exhaustive：一次回最多 500，沒有 round 概念，直接呼叫 callback 一次
             hits = await search_pipeline.run_search(
                 keyword=and_query,
-                court=None, case_type=None, year_from=None, year_to=None,
+                court=None, case_type=None,
+                year_from=work.year_from, year_to=work.year_to,
                 max_results=min(search_pipeline.SITE_MAX_PER_QUERY, remaining),
                 single_query=True,
                 main_text=work.main_text,
