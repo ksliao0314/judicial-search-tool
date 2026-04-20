@@ -7250,7 +7250,7 @@ function _showPendingFinalBanner() {
     <span class="text-warm-600 flex-1">全部分析完成、結果已更新（切回「全部」tab 或關閉閱讀器時自動套用）</span>
     <button id="card-synth-apply-final-btn"
       class="font-mono text-[11px] text-seal hover:text-ink border border-seal hover:border-ink px-2 py-1 rounded-sm transition-colors shrink-0">
-      立即刷新 →
+      立即更新 →
     </button>`;
   const btn = document.getElementById('card-synth-apply-final-btn');
   if (btn) btn.addEventListener('click', _applyPendingFinalRefresh);
