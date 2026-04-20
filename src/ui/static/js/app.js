@@ -2731,7 +2731,7 @@ function renderStage3View(analysis, relevant, irrelevant) {
                 <span class="font-mono text-xs text-warm-400 ml-auto shrink-0">${escHtml(r.date || '')}</span>
               </div>
               ${position ? `<p class="text-xs text-warm-600 font-serif italic mt-1 leading-relaxed">${escHtml(position)}</p>` : ''}
-              ${excerpt ? `<p class="text-xs font-serif mt-1 leading-relaxed result-excerpt-box inline-block">${escHtml(excerpt.slice(0, 180))}</p>` : ''}
+              ${excerpt ? `<p class="text-xs font-serif mt-1 leading-relaxed result-excerpt-box inline-block">${escHtml(_truncateExcerpt(excerpt, 180))}</p>` : ''}
             </div>
           </div>
         </div>`;
@@ -4694,7 +4694,7 @@ function renderCardResultsPage(reset = false) {
     // 剝掉開頭的 [理由] / [主文] / [事實] / [引用法條] / [全文] label（found_in 指示器）、
     // 列表用 150 字摘要已無空間放這種 meta、且 UI 欄位已各自標示所屬來源、重複顯示多餘
     const excerptClean = excerpt.replace(/^\[(理由|主文|事實|引用法條|全文)\]\s*/, '');
-    const excerptDisplay = excerptClean ? excerptClean.slice(0, 150) : '';
+    const excerptDisplay = _truncateExcerpt(excerptClean, 150);
     const parsed = parseCaseDisplay(r.case_id);
     const isRead = state.card.readCaseIds.has(r.case_id);
     const isStarred = state.starred.has(r.case_id);
@@ -8307,6 +8307,20 @@ function escHtml(s) {
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 function escAttr(s) { return String(s).replace(/"/g,'&quot;'); }
+
+// 列表 excerpt 專用截斷：若超過 maxLen、尾端若為標點（看起來像完整句）會往前退掉、
+// 最後補「…」表示被截、讓律師一眼看出是 truncation 不是完整摘要結尾
+function _truncateExcerpt(text, maxLen) {
+  if (!text) return '';
+  if (text.length <= maxLen) return text;
+  let t = text.slice(0, maxLen);
+  // 全/半形標點 + 空白 + 引號 + 括號 → 往前剝、避免假裝完整句
+  const trailingPunct = /[。，、；：？！「」『』（）()『』\s　]/;
+  while (t.length > 0 && trailingPunct.test(t.slice(-1))) {
+    t = t.slice(0, -1);
+  }
+  return t + '…';
+}
 
 // ─── Reader (State C) ─────────────────────────────
 let _readerData      = null;
