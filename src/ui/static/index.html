@@ -577,13 +577,18 @@
               title=""></span>
           </div>
           <div class="col-start-3 flex items-center gap-1 shrink-0 justify-self-end">
-            <!-- Prev/Next 判決 -->
+            <!-- Prev/Next 判決 + 中間「分類 N/total」chip -->
             <button id="rc-prev" aria-label="上一篇判決 (K)" title="上一篇 (K)"
               class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm disabled:opacity-30 disabled:cursor-not-allowed">
               <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
                    stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                 <polyline points="15 18 9 12 15 6"/>
               </svg>
+            </button>
+            <button id="rc-cluster-pos" type="button" title="回到列表"
+              class="hidden text-xs text-warm-500 hover:text-seal hover:underline transition-colors px-2 min-h-[28px] items-center gap-1.5 cursor-pointer">
+              <span id="rc-cluster-name" class="font-serif"></span>
+              <span id="rc-cluster-idx" class="font-mono text-ink"></span>
             </button>
             <button id="rc-next" aria-label="下一篇判決 (J)" title="下一篇 (J)"
               class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm disabled:opacity-30 disabled:cursor-not-allowed">

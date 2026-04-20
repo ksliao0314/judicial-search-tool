@@ -342,8 +342,12 @@ def _strip_inline_tags(html: str) -> str:
     return html
 
 
-def parse_judgment_page(html: str) -> dict:
-    """解析裁判書全文頁面（printData.aspx）"""
+def parse_judgment_page(html: str, jid: str | None = None) -> dict:
+    """解析裁判書全文頁面（printData.aspx）
+
+    jid: 若提供且 HTML 前 10 行 COURT_PATTERN 掃不到法院名（如 TPAA 最高行政
+    法院某些格式），fallback 從 JID prefix 推導（_enrich_from_jid）。
+    """
     soup = BeautifulSoup(html, "lxml")
 
     result = {
@@ -414,6 +418,13 @@ def parse_judgment_page(html: str) -> dict:
     # 擷取引用法條
     result["cited_statutes"] = _extract_cited_statutes(result["full_text"])
     result["cited_cases"] = _extract_cited_cases(result["full_text"])
+
+    # 法院名 fallback：COURT_PATTERN 掃前 10 行 miss 時，從 JID prefix 推導
+    if not result.get("court") and jid:
+        enrich_entry = {"jid": jid, "case_id": result.get("case_id", "")}
+        _enrich_from_jid(enrich_entry)
+        if enrich_entry.get("court"):
+            result["court"] = enrich_entry["court"]
 
     return result
 

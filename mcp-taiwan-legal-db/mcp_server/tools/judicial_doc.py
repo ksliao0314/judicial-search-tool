@@ -84,9 +84,9 @@ class JudgmentDocClient:
             jud_el = soup.select_one("#jud")
             if jud_el:
                 jud_html = str(jud_el)
-                parsed = parse_judgment_page(f"<html><body>{jud_html}</body></html>")
+                parsed = parse_judgment_page(f"<html><body>{jud_html}</body></html>", jid=cache_key)
             else:
-                parsed = parse_judgment_page(resp.text)
+                parsed = parse_judgment_page(resp.text, jid=cache_key)
 
             if parsed.get("full_text"):
                 data = {
@@ -133,7 +133,7 @@ class JudgmentDocClient:
                 return None
 
             jud_html = str(jud_el)
-            parsed = parse_judgment_page(f"<html><body>{jud_html}</body></html>")
+            parsed = parse_judgment_page(f"<html><body>{jud_html}</body></html>", jid=jid)
 
             if not parsed.get("full_text") or len(parsed["full_text"]) < len(full_text.strip()):
                 parsed["full_text"] = full_text.strip()

@@ -2309,7 +2309,7 @@ function renderStage2Filters() {
   // ── 法院層級 counts ──
   const tierCounts = {};
   for (const t of STAGE2_COURT_TIERS) tierCounts[t] = 0;
-  for (const h of state.hits) tierCounts[inferTier(h.court)]++;
+  for (const h of state.hits) tierCounts[inferTier(courtOf(h))]++;
 
   const tierEl = document.getElementById('stage2-tier-filters');
   tierEl.innerHTML = STAGE2_COURT_TIERS.filter(t => tierCounts[t] > 0).map(tier => {
@@ -2341,7 +2341,7 @@ function applyStage2Filters() {
                   && f.yearFrom != null && f.yearTo != null
                   && (f.yearFrom > f.yearMin || f.yearTo < f.yearMax);
   return state.hits.filter(h => {
-    if (f.selectedTiers.size > 0 && !f.selectedTiers.has(inferTier(h.court))) return false;
+    if (f.selectedTiers.size > 0 && !f.selectedTiers.has(inferTier(courtOf(h)))) return false;
     if (yearActive) {
       const yr = parseInt((h.date || '').split('-')[0], 10);
       if (Number.isFinite(yr)) {
@@ -2379,7 +2379,7 @@ function renderStage2List() {
 
   listEl.innerHTML = filtered.map(h => {
     const safeId = escAttr(h.case_id);
-    const court = escHtml(h.court || '');
+    const court = escHtml(courtOf(h));
     const causeBadge = h.cause
       ? `<span class="font-mono text-[10px] bg-warm-100 text-warm-500 px-1.5 py-0.5 shrink-0">${escHtml(h.cause)}</span>`
       : '';
@@ -2726,7 +2726,7 @@ function renderStage3View(analysis, relevant, irrelevant) {
             <span class="font-mono text-xl font-medium ${scoreColor} leading-none w-8 shrink-0">${score}</span>
             <div class="flex-1 min-w-0">
               <div class="flex items-baseline gap-2">
-                <span class="font-serif text-sm font-semibold text-ink">${escHtml(r.court || '')}</span>
+                <span class="font-serif text-sm font-semibold text-ink">${escHtml(courtOf(r))}</span>
                 <span class="font-mono text-xs text-seal truncate">${escHtml(r.case_id)}</span>
                 <span class="font-mono text-xs text-warm-400 ml-auto shrink-0">${escHtml(r.date || '')}</span>
               </div>
@@ -2747,7 +2747,7 @@ function renderStage3View(analysis, relevant, irrelevant) {
       <div class="flex items-baseline gap-3 px-2 py-1.5 text-xs text-warm-400 hover:text-warm-600 cursor-pointer transition-colors"
            onclick="navTo({view:'reader', taskId:state.currentTaskId, caseId:'${safeId}'})">
         <span class="font-mono w-5 shrink-0">—</span>
-        <span class="font-serif truncate">${escHtml(r.court || '')}</span>
+        <span class="font-serif truncate">${escHtml(courtOf(r))}</span>
         <span class="font-mono text-[11px] truncate">${escHtml(r.case_id)}</span>
         <span class="font-mono text-[11px] ml-auto shrink-0">${escHtml(r.date || '')}</span>
       </div>`;
@@ -3123,7 +3123,7 @@ function renderCardTierChips() {
 
   const tierCounts = {};
   for (const t of STAGE2_COURT_TIERS) tierCounts[t] = 0;
-  for (const h of state.hits) tierCounts[inferTier(h.court)]++;
+  for (const h of state.hits) tierCounts[inferTier(courtOf(h))]++;
 
   el.innerHTML = STAGE2_COURT_TIERS.filter(t => tierCounts[t] > 0).map(tier => {
     const checked = state.stage2.selectedTiers.has(tier);
@@ -3321,7 +3321,7 @@ function renderCardHitPreview() {
   previewEl.innerHTML = filtered.slice(0, 2).map(h => `
     <div class="py-2 border-b border-warm-100">
       <div class="flex items-baseline gap-2">
-        <span class="font-serif text-sm text-ink">${escHtml(h.court || '')}</span>
+        <span class="font-serif text-sm text-ink">${escHtml(courtOf(h))}</span>
         <span class="font-mono text-xs text-seal truncate">${escHtml(h.case_id)}</span>
         <span class="font-mono text-xs text-warm-400 ml-auto shrink-0">${escHtml(h.date)}</span>
       </div>
@@ -4718,7 +4718,7 @@ function renderCardResultsPage(reset = false) {
     //   link text = 去「司法院」前綴的「釋字第N號」/「XXX年憲判字第N號」
     // 其他（普通判決）：照原樣
     const isInterpRow = /^司法院釋字/.test(r.case_id) || /^釋字/.test(r.case_id);
-    const courtDisplay = isInterpRow ? '司法院' : (r.court || '');
+    const courtDisplay = isInterpRow ? '司法院' : courtOf(r);
     const linkDisplay = isInterpRow
       ? parsed.display.replace(/^司法院/, '')
       : parsed.display;
@@ -6401,7 +6401,7 @@ async function openReaderCard(taskId, caseId, { replaceHistory = false } = {}) {
   //   - 當事人 → 在主文上方（依判決書格式）
   //   - 法官署名 → 整份判決末尾
   const parsed = parseCaseDisplay(_readerJudgment.case_id || caseId);
-  const court = _readerJudgment.court || '';
+  const court = courtOf(_readerJudgment);
   const metaEl = document.getElementById('rc-meta');
   const cause = _readerJudgment.cause || '';
 
@@ -7030,6 +7030,17 @@ function _showReaderToast(msg) {
     setTimeout(() => toast.remove(), 320);
   }, 1500);
 }
+// 當前 cluster tab 顯示名（與 renderCardClusterTabs 保持一致的 label 來源）
+function _currentClusterLabel() {
+  const ac = state.card?.activeCluster;
+  if (ac == null) return '全部';
+  if (ac === 'starred') return '使用者標記';
+  if (ac === 'irrelevant') return '無關';
+  if (ac === 'data_error') return '資料錯誤';
+  if (typeof ac === 'number') return state.card?.clusters?.[ac]?.label || '';
+  return '';
+}
+
 function _updateNavButtons() {
   if (!_readerJudgment) return;
   const taskId = state.card.taskId || state.currentTaskId;
@@ -7041,9 +7052,26 @@ function _updateNavButtons() {
   const nextBtn = document.getElementById('rc-next');
   if (prevBtn) prevBtn.disabled = idx <= 0;
   if (nextBtn) nextBtn.disabled = idx < 0 || idx >= list.length - 1;
+
+  // 中間「分類 · N/total」chip — 點擊回到列表、同步隱藏/顯示
+  const posEl = document.getElementById('rc-cluster-pos');
+  if (posEl) {
+    const nameEl = document.getElementById('rc-cluster-name');
+    const idxEl = document.getElementById('rc-cluster-idx');
+    if (idx < 0 || list.length === 0) {
+      posEl.classList.add('hidden');
+      posEl.classList.remove('inline-flex');
+    } else {
+      posEl.classList.remove('hidden');
+      posEl.classList.add('inline-flex');
+      if (nameEl) nameEl.textContent = _currentClusterLabel();
+      if (idxEl) idxEl.textContent = `${idx + 1}/${list.length}`;
+    }
+  }
 }
 document.getElementById('rc-prev')?.addEventListener('click', () => _navigateJudgment(-1));
 document.getElementById('rc-next')?.addEventListener('click', () => _navigateJudgment(1));
+document.getElementById('rc-cluster-pos')?.addEventListener('click', () => closeReaderCard());
 // 2026-04-19：原本是側欄收合 toggle，改成「返回分析列表」
 // — 律師實際沒有收起 outline 的需求，這顆按鈕的位置（outline/content 交界、
 // 左向 chevron）其實更像 back button。
@@ -7698,7 +7726,7 @@ function renderJudgmentList(items) {
            onclick="selectRow(this, '${escAttr(j.case_id)}')">
         <div class="flex-1 min-w-0 py-3 pr-3">
           <div class="flex items-baseline gap-2.5">
-            <span class="text-sm font-serif font-semibold text-ink leading-snug">${escHtml(j.court || '')}</span>
+            <span class="text-sm font-serif font-semibold text-ink leading-snug">${escHtml(courtOf(j))}</span>
             <span class="font-mono text-xs text-seal font-medium">${escHtml(j.case_id || '')}</span>
           </div>
           <div class="flex items-center gap-2 mt-0.5">
@@ -8332,6 +8360,56 @@ function escHtml(s) {
 }
 function escAttr(s) { return String(s).replace(/"/g,'&quot;'); }
 
+// ─── 法院名 fallback：當 DB `court` 欄位空（歷史資料或 MCP parser miss）時從 JID prefix 推導 ─────
+// 對照表必須與 mcp_server/config.COURT_CODE_TO_NAME 同步。
+const _COURT_CODE_TO_NAME = {
+  'JCC': '憲法法庭', 'TPC': '司法院刑事補償法庭',
+  'TPS': '最高法院', 'TPA': '最高行政法院',
+  'TPP': '懲戒法院', 'TPPD': '懲戒法院懲戒法庭', 'TPJ': '懲戒法院職務法庭',
+  'IPC': '智慧財產及商業法院',
+  'TPH': '臺灣高等法院', 'TCH': '臺灣高等法院臺中分院', 'TNH': '臺灣高等法院臺南分院',
+  'KSH': '臺灣高等法院高雄分院', 'HLH': '臺灣高等法院花蓮分院', 'KMH': '福建高等法院金門分院',
+  'TPB': '臺北高等行政法院', 'TCB': '臺中高等行政法院', 'KSB': '高雄高等行政法院',
+  'TPD': '臺灣臺北地方法院', 'SLD': '臺灣士林地方法院', 'PCD': '臺灣新北地方法院',
+  'ILD': '臺灣宜蘭地方法院', 'KLD': '臺灣基隆地方法院', 'TYD': '臺灣桃園地方法院',
+  'SCD': '臺灣新竹地方法院', 'MLD': '臺灣苗栗地方法院', 'TCD': '臺灣臺中地方法院',
+  'CHD': '臺灣彰化地方法院', 'NTD': '臺灣南投地方法院', 'ULD': '臺灣雲林地方法院',
+  'CYD': '臺灣嘉義地方法院', 'TND': '臺灣臺南地方法院', 'KSD': '臺灣高雄地方法院',
+  'CTD': '臺灣橋頭地方法院', 'HLD': '臺灣花蓮地方法院', 'TTD': '臺灣臺東地方法院',
+  'PTD': '臺灣屏東地方法院', 'PHD': '臺灣澎湖地方法院', 'KMD': '福建金門地方法院',
+  'LCD': '福建連江地方法院', 'KSY': '臺灣高雄少年及家事法院',
+};
+// 長 prefix 優先（避免 TPP 被 TP 吃掉之類誤 match）
+const _SORTED_COURT_CODES = Object.keys(_COURT_CODE_TO_NAME).sort((a, b) => b.length - a.length);
+
+function _deriveCourtFromJid(jid) {
+  if (!jid) return '';
+  const prefix = String(jid).split(',')[0] || '';
+  if (!prefix) return '';
+  for (const code of _SORTED_COURT_CODES) {
+    if (prefix.startsWith(code)) return _COURT_CODE_TO_NAME[code];
+  }
+  return '';
+}
+
+// 用於 list / reader 顯示：r.court 空 → 從 source_url 解 JID prefix → 再 fallback 從 case_id 中文前段
+function courtOf(r) {
+  if (!r) return '';
+  if (r.court) return r.court;
+  if (r.source_url) {
+    const m = String(r.source_url).match(/[?&]id=([^&]+)/);
+    if (m) {
+      const derived = _deriveCourtFromJid(m[1]);
+      if (derived) return derived;
+    }
+  }
+  if (r.case_id) {
+    const m = String(r.case_id).match(/^([\u4e00-\u9fff\s]+?)\s*\d/);
+    if (m) return m[1].trim().replace(/\s+/g, ' ');
+  }
+  return '';
+}
+
 // 列表 excerpt 專用截斷：若超過 maxLen、尾端若為標點（看起來像完整句）會往前退掉、
 // 最後補「…」表示被截、讓律師一眼看出是 truncation 不是完整摘要結尾
 function _truncateExcerpt(text, maxLen) {
@@ -8405,7 +8483,7 @@ async function openReader(caseId) {
       <div class="border-l-4 ${borderCls} px-3 py-2.5 cursor-pointer transition-colors
                   ${j.case_id === caseId ? 'bg-seal/5' : 'hover:bg-warm-100'}"
            onclick="navTo({view:'reader', taskId:state.currentTaskId, caseId:'${escAttr(j.case_id)}'}, true)" role="option" aria-selected="${j.case_id === caseId}">
-        <div class="font-serif text-xs text-ink font-semibold leading-snug truncate">${escHtml(j.court || '')}</div>
+        <div class="font-serif text-xs text-ink font-semibold leading-snug truncate">${escHtml(courtOf(j))}</div>
         <div class="font-mono text-[11px] text-seal truncate">${escHtml(j.case_id)}</div>
         ${scoreLine}
       </div>`;
@@ -8606,7 +8684,7 @@ function highlightKeywords(text, keyword) {
 }
 
 function formatCitation(judgment) {
-  const court = judgment.court || '';
+  const court = courtOf(judgment);
   const parts = (judgment.case_id || '').split(',');
   const year = parts[1] || '';
   const type = parts[2] || '';
