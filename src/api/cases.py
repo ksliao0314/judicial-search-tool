@@ -3,13 +3,21 @@
 把判決精讀結果的組織維度從「task」提升到「case_id」，讓律師過往花 token 換來的
 分析可以跨 task 復用：
   - 星標（case_stars）：律師手動收藏的判決，持久化跨 session
+  - 劃記（case_highlights）：reader 中黃底劃記，跨裝置同步
   - 歷史精讀：某 case_id 在歷來所有 task / analysis 中的評分、立場、摘要
 """
 from fastapi import APIRouter, HTTPException
+from pydantic import BaseModel, Field
 
 from src.db import database as db
 
 router = APIRouter(tags=["cases"])
+
+
+class HighlightCreate(BaseModel):
+    text: str = Field(..., min_length=1, max_length=5000)
+    before: str = Field("", max_length=100)
+    after: str = Field("", max_length=100)
 
 
 @router.get("/cases/starred")
@@ -30,6 +38,32 @@ async def star(case_id: str) -> None:
 async def unstar(case_id: str) -> None:
     """取消星標。不存在時 no-op（冪等）。"""
     await db.unstar_case(case_id)
+
+
+@router.get("/cases/{case_id}/highlights")
+async def list_highlights(case_id: str) -> list[dict]:
+    """回傳某 case_id 的所有黃底劃記（created_at 升冪）。"""
+    return await db.list_case_highlights(case_id)
+
+
+@router.post("/cases/{case_id}/highlights", status_code=201)
+async def add_highlight(case_id: str, body: HighlightCreate) -> dict:
+    """新增黃底劃記。回傳 `{id}` 供前端 DOM 節點關聯（取消標記時 DELETE-by-id）。"""
+    if not case_id.strip():
+        raise HTTPException(status_code=400, detail="case_id 不可為空")
+    hl_id = await db.add_case_highlight(
+        case_id=case_id,
+        text=body.text,
+        before_ctx=body.before,
+        after_ctx=body.after,
+    )
+    return {"id": hl_id}
+
+
+@router.delete("/cases/{case_id}/highlights/{highlight_id}", status_code=204)
+async def remove_highlight(case_id: str, highlight_id: int) -> None:
+    """取消標記。case_id 只供路徑可讀性、實際刪除靠 highlight_id。"""
+    await db.remove_case_highlight(highlight_id)
 
 
 @router.get("/cases/{case_id}/analyses")

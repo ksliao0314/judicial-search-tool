@@ -153,6 +153,20 @@ CREATE TABLE IF NOT EXISTS case_stars (
     starred_at TEXT NOT NULL
 );
 
+-- 律師在 reader 中對判決文字做的黃底劃記（cross-device 同步用、脫離 localStorage）。
+-- before_ctx / after_ctx = 選取範圍前後 20 字、reopen reader 時用上下文比對重新定位
+--   （比單靠 text 精確：處理重複文字命中）
+-- 刪除 task 不連動刪 highlight — 跟星標同設計，跨 task 永久資產。
+CREATE TABLE IF NOT EXISTS case_highlights (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    case_id    TEXT NOT NULL,
+    text       TEXT NOT NULL,
+    before_ctx TEXT,
+    after_ctx  TEXT,
+    created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_ch_case ON case_highlights(case_id);
+
 -- Stage 2.5 in-flight tracker：給 server 重啟 recovery 用。
 -- POST /tasks/{id}/fetch-judgments 時 INSERT、_run_stage25_fetch 結束時 DELETE。
 -- Server 重啟時 main.py lifespan 掃這張表 → 重新 dispatch 每筆。

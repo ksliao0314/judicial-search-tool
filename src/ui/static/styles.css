@@ -621,6 +621,18 @@
     .score-bar-fill { width: 0; transition: width .8s cubic-bezier(.16,1,.3,1); }
     .hit-mark { background: rgba(109,90,65,.08); border: 1px solid rgba(109,90,65,.22); border-radius: 2px; padding: 0 3px; }
 
+    /* 律師手動標記 — 黃底、persistent via localStorage；cursor 提示可點（彈出「取消標記」）*/
+    .reader-user-highlight {
+      background: rgba(255, 230, 0, 0.42);
+      padding: 0 2px;
+      border-radius: 2px;
+      cursor: pointer;
+      transition: background 120ms ease;
+    }
+    .reader-user-highlight:hover {
+      background: rgba(255, 200, 0, 0.58);
+    }
+
     @keyframes pulse-dot { 0%,100% { opacity: 1; } 50% { opacity: .3; } }
     .pulse-dot { animation: pulse-dot 1.4s ease-in-out infinite; }
     @keyframes progress-stripe {
@@ -816,6 +828,13 @@
     }
     .rc-parties-summary::-webkit-details-marker { display: none; }
     .rc-parties-summary:hover { color: #111110; }
+    /* 收合點擊時不顯示黑框 focus outline — chevron 旋轉已足夠回饋狀態變化 */
+    .rc-parties-summary:focus { outline: none; }
+    .rc-parties-summary:focus-visible {
+      outline: 2px solid var(--d-seal);
+      outline-offset: 2px;
+      border-radius: 2px;
+    }
     .rc-parties-label {
       font-family: 'Noto Serif TC', serif; font-size: 14px;
       color: #111110; font-weight: 600; letter-spacing: 0.02em;

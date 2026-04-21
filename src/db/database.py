@@ -655,6 +655,48 @@ async def list_starred_cases() -> list[str]:
         return [r["case_id"] for r in rows]
 
 
+# ---------------------------------------------------------------------------
+# case_highlights（律師 reader 黃底劃記、跨裝置同步）
+# ---------------------------------------------------------------------------
+
+async def list_case_highlights(case_id: str) -> list[dict]:
+    """回傳某 case_id 的所有黃底劃記（created 升冪、讓律師先劃的先顯示）。"""
+    async with _conn() as db:
+        cursor = await db.execute(
+            "SELECT id, text, before_ctx, after_ctx, created_at "
+            "FROM case_highlights WHERE case_id = ? ORDER BY created_at ASC",
+            (case_id,),
+        )
+        rows = await cursor.fetchall()
+        return [dict(r) for r in rows]
+
+
+async def add_case_highlight(
+    case_id: str, text: str, before_ctx: str, after_ctx: str
+) -> int:
+    """新增一筆劃記。return auto-increment id。dedup 在 route 層做、DB 不強制 unique
+    （允許律師對同一段文字重複標記的 edge case、不致 constraint error）。
+    """
+    async with _conn() as db:
+        cursor = await db.execute(
+            "INSERT INTO case_highlights (case_id, text, before_ctx, after_ctx, created_at) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (case_id, text, before_ctx, after_ctx, _now()),
+        )
+        await db.commit()
+        return cursor.lastrowid
+
+
+async def remove_case_highlight(highlight_id: int) -> bool:
+    """刪除指定 id 的劃記。return True 若真的刪到 row。"""
+    async with _conn() as db:
+        cursor = await db.execute(
+            "DELETE FROM case_highlights WHERE id = ?", (highlight_id,)
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
 async def list_case_analyses(case_id: str) -> list[dict]:
     """回傳某 case_id 歷來在所有 task / analysis 中的精讀結果（case-level 聚合視圖）。
 

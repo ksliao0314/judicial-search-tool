@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="判決智能檢索",
     description="給律師用的司法院判決 AI 篩選工具",
-    version="0.1.0",
+    version="1.0.3",
     lifespan=lifespan,
 )
 

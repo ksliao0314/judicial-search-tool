@@ -6574,6 +6574,78 @@ function _isOldInterpretationReader() {
   return /^司法院釋字/.test(cid) || /^釋字/.test(cid);
 }
 
+// ── 當事人展平：把 MCP parser 同群 list 中的 sub-role 切成獨立 row ──
+//
+// MCP parser 將判決書 header 區塊的「當事人」訊息 parse 成 dict（角色 → list）。
+// 然而原文中同一個角色分類下常夾雜「選任辯護人」「即被告」等 sub-role header：
+//
+//   原文：       被告       高興黼
+//                選任辯護人  李建慶律師
+//                            方伯勳律師
+//   parser out: {'被告': ['高興黼', '選任辯護人\u3000李建慶律師', '方伯勳律師']}
+//
+// 律師預期畫面把「選任辯護人」跟「被告」同層對齊、不是擠在「被告」的 member 區。
+// 另一種是「上訴人即被告」的複合 role：
+//   原文：       上訴人     臺灣彰化地方檢察署檢察官
+//                上訴人
+//                即被告     徐郁凱
+//   parser out: {'上訴人': ['...檢察官', '上\u3000訴\u3000人', '即\u3000被\u3000告\u3000徐郁凱']}
+//
+// 這裡把兩種情況都展平成 [{role, members[]}] 讓渲染端每個 role 獨立一 row。
+function _splitPartyRows(topRole, items) {
+  // 角色標籤（依長度 DESC 排序、避免「辯護人」搶先「選任辯護人」）
+  const ROLES = [
+    '訴訟代理人', '告訴代理人', '法定代理人',
+    '選任辯護人', '指定辯護人', '公設辯護人',
+    '再抗告人',
+    '上訴人', '抗告人', '相對人',
+    '告訴人', '輔佐人', '代理人',
+    '被告', '原告', '辯護人',
+  ];
+  const norm = s => String(s || '').replace(/[\u3000\s]+/g, '');
+
+  const rows = [];
+  let cur = { role: topRole, members: [] };
+  const flush = () => { if (cur.members.length) rows.push(cur); };
+
+  for (const raw of items || []) {
+    const n = norm(raw);
+
+    // 複合 role：「即被告 XXX」—— 前提 cur 剛起頭（無 members）且 cur.role 是已知標籤
+    // 典型：cur.role='上訴人'（只有 label 那行）接到「即被告徐郁凱」→ 合成「上訴人即被告」
+    const mComp = n.match(/^即(被告|上訴人|抗告人|原告|相對人|告訴人|辯護人)(.*)$/);
+    if (mComp && cur.members.length === 0 && ROLES.includes(cur.role)) {
+      cur.role = `${cur.role}即${mComp[1]}`;
+      if (mComp[2]) cur.members.push(mComp[2]);
+      continue;
+    }
+
+    // 一般 role label 前綴匹配（長 → 短，第一個匹配採用）
+    let matched = null;
+    let rest = '';
+    for (const r of ROLES) {
+      if (n === r || n.startsWith(r)) {
+        matched = r;
+        rest = n.slice(r.length);
+        break;
+      }
+    }
+
+    if (matched) {
+      // 新 role 出現 → flush 舊的、開新 row
+      flush();
+      cur = { role: matched, members: rest ? [rest] : [] };
+    } else {
+      // 一般 member 行
+      cur.members.push(raw);
+    }
+  }
+  flush();
+  // 全空（極端 fallback）：保留 topRole 一 row 避免什麼都不顯示
+  if (!rows.length) return [{ role: topRole, members: items || [] }];
+  return rows;
+}
+
 function renderRcCombinedText() {
   // 全文模式：AI 評價 + 當事人 + 主文 + 理由（+ 事實 if exists）依序排列
   // 依司法院判決書格式：AI 評價 → 當事人 → 主文 → 事實/理由 → 法官署名
@@ -6616,11 +6688,16 @@ function renderRcCombinedText() {
   try { parties = JSON.parse(_readerJudgment.parties || '{}'); } catch {}
   const partyKeys = Object.keys(parties || {});
   if (partyKeys.length) {
-    const partyRows = partyKeys.map(role => {
-      const members = (parties[role] || []).map(m => escHtml(m)).join('<br>');
+    // MCP parser 把判決書 header 裡同群出現的 sub-role（選任辯護人 / 辯護人 / 代理人）和
+    // 複合 role（「上訴人即被告」）都塞進同一個 list，這裡展平成獨立 row 對齊顯示
+    const allRows = partyKeys.flatMap(role => _splitPartyRows(role, parties[role] || []));
+    const partyRows = allRows.map(({ role, members }) => {
+      const membersHtml = members
+        .map(m => escHtml(String(m).replace(/[\u3000\s]+/g, ' ').trim()))
+        .join('<br>');
       return `<div class="flex items-start gap-4 py-1">
-        <span class="text-sm font-mono text-warm-500 shrink-0 w-[5.5rem]">${escHtml(role)}</span>
-        <span class="text-[14px] font-serif text-ink leading-[1.7]">${members}</span>
+        <span class="text-sm font-mono text-warm-500 shrink-0 min-w-[6.5rem] whitespace-nowrap">${escHtml(role)}</span>
+        <span class="text-[14px] font-serif text-ink leading-[1.7]">${membersHtml}</span>
       </div>`;
     }).join('');
     partiesHtml = `
@@ -6832,6 +6909,9 @@ async function openReaderCard(taskId, caseId, { replaceHistory = false } = {}) {
 
   // Keyword highlighting — 用 task 的所有關鍵字（含展開變體）標紅
   highlightKeywordsInReader(taskId);
+
+  // 套用律師手動標記（localStorage 讀 → wrap 匹配 text nodes）
+  applyUserHighlights(caseId);
 
   // Show card first (so scroll works on visible element)
   document.getElementById('reader-card-backdrop').classList.remove('hidden');
@@ -7161,6 +7241,11 @@ function closeReaderCard(skipHistory = false) {
   const wasOpen = !document.getElementById('reader-card').classList.contains('hidden');
   document.getElementById('reader-card-backdrop').classList.add('hidden');
   document.getElementById('reader-card').classList.add('hidden');
+  // 收回選取工具列 / 標記 popover（避免下次開 reader 時殘留在舊位置）
+  const _tb = document.getElementById('rc-selection-toolbar');
+  if (_tb) _tb.classList.add('hidden');
+  const _pop = document.getElementById('rc-highlight-popover');
+  if (_pop) { _pop.classList.add('hidden'); _pop._targetMark = null; }
   _readerJudgment = null;
   unlockBodyScroll();
   // 返回結果頁時重繪 cluster tabs（星星狀態可能改了）
@@ -7318,16 +7403,126 @@ function buildCombinedText() {
 // Event handlers
 document.getElementById('rc-close').addEventListener('click', () => closeReaderCard());
 
-// Download starred PDFs (bulk zip)
-// 暫時停用 — PDF 下載功能尚未通過驗證、待重構（2026-04-19）
+// Download starred PDFs (bulk zip) — 抓司法院原版 PDF 打包
+// backend /bulk-pdf 以 concurrency 5 平行抓、失敗的會寫入 zip 內的 _失敗清單.txt
 async function downloadStarredPdfs() {
-  alert('功能開發中，尚不支援');
+  const taskId = state.card.taskId || state.currentTaskId;
+  if (!taskId) return;
+
+  // 找出這個 task 裡被標記的 case_ids（star 是跨 task 的、要 intersect 本 task 的 pool）
+  const pool = [
+    ...(state.card.allResults || []),
+    ...(state.card.irrelevantResults || []),
+    ...(state.card.dataErrorResults || []),
+  ];
+  const starredInTask = pool.filter(r => state.starred.has(r.case_id));
+  const caseIds = starredInTask.map(r => r.case_id);
+  if (!caseIds.length) {
+    alert('此任務中沒有標記的判決');
+    return;
+  }
+
+  // 提示中：抓取需要時間（每筆 1-3 秒 depending on 司法院 server）
+  const btn = document.querySelector('[data-action="download-starred"]');
+  const orig = btn ? btn.innerHTML : null;
+  if (btn) {
+    btn.innerHTML = '<span class="inline-block animate-pulse">抓取中…</span>';
+    btn.style.pointerEvents = 'none';
+  }
+
+  try {
+    const res = await apiFetch(`/api/tasks/${taskId}/judgments/bulk-pdf`, {
+      method: 'POST',
+      body: JSON.stringify({ case_ids: caseIds }),
+    });
+    if (!res.ok) {
+      const text = await res.text();
+      throw new Error(`${res.status}: ${text}`);
+    }
+    const blob = await res.blob();
+    // 從 response header 取檔名、沒有就自己組
+    const cd = res.headers.get('Content-Disposition') || '';
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : `judicial_pdfs_${new Date().toISOString().slice(0,10)}.zip`;
+
+    // trigger download
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  } catch (err) {
+    console.error('[bulk-pdf] 失敗:', err);
+    alert(`下載失敗：${err.message}`);
+  } finally {
+    if (btn && orig !== null) {
+      btn.innerHTML = orig;
+      btn.style.pointerEvents = '';
+    }
+  }
+}
+
+// 從判決的 source_url（或 JID 格式 case_id）組出司法院 PDF 直接下載 URL
+//   source_url: https://judgment.judicial.gov.tw/FJUD/data.aspx?ty=JD&id=PCDV,114,重訴,679,20260416,1
+//   PDF URL:    https://judgment.judicial.gov.tw/FILES/PCDV/114%2c%e9%87%8d%e8%a8%b4%2c679%2c20260416%2c1.pdf
+// 規則：JID 切 comma、第一段（法院代碼）當 path 目錄、其餘 5 段 URL-encode 接 .pdf 當 filename
+// 司法院每筆判決都有這個 pre-generated PDF、不需額外 API call
+function pdfUrlFromJudgment(judgment) {
+  if (!judgment) return null;
+  let jid = null;
+  if (judgment.source_url) {
+    const m = String(judgment.source_url).match(/[?&]id=([^&]+)/);
+    if (m) { try { jid = decodeURIComponent(m[1]); } catch { jid = m[1]; } }
+  }
+  if (!jid && judgment.case_id && /^[A-Z]+,/.test(judgment.case_id)) {
+    jid = judgment.case_id;
+  }
+  if (!jid) return null;
+  const parts = jid.split(',');
+  if (parts.length < 2) return null;
+  const prefix = parts[0];
+  const rest = parts.slice(1).join(',');
+  return `https://judgment.judicial.gov.tw/FILES/${prefix}/${encodeURIComponent(rest)}.pdf`;
 }
 
 // Download PDF (single)
-// 暫時停用 — PDF 下載功能尚未通過驗證、待重構（2026-04-19）
-document.getElementById('rc-download-pdf').addEventListener('click', () => {
-  alert('功能開發中，尚不支援');
+// 統一走 backend /api/pdf-url 解析：
+//   · 一般判決：HEAD 驗 /FILES/*.pdf。有 pre-gen 就直開；沒有（ispdf=0 舊判決）
+//     → fallback 回 source_url、前端開原文頁 + toast 提醒律師手動點「轉存PDF」
+//   · 憲判字 / 釋字：backend 抓 docdata 頁解析 download.aspx URL
+// 為避免 popup blocker、先同步開 about:blank、拿到 URL 再設 location.href
+document.getElementById('rc-download-pdf').addEventListener('click', async () => {
+  if (!_readerJudgment || !_readerJudgment.source_url) {
+    _showReaderToast('此判決無 source_url、無法產生 PDF 連結');
+    return;
+  }
+  const tab = window.open('about:blank', '_blank');
+  if (!tab) {
+    _showReaderToast('瀏覽器阻擋了彈出視窗、請放行後再試');
+    return;
+  }
+  try {
+    const qs = new URLSearchParams({ source_url: _readerJudgment.source_url });
+    if (_readerJudgment.case_id) qs.set('case_id', _readerJudgment.case_id);
+    const res = await apiFetch(`/api/pdf-url?${qs}`);
+    if (!res.ok) {
+      tab.close();
+      const body = await res.json().catch(() => ({}));
+      _showReaderToast(body.detail || `取得 PDF 連結失敗（${res.status}）`);
+      return;
+    }
+    const { url, kind, detail } = await res.json();
+    if (!url) { tab.close(); _showReaderToast('司法院未提供此判決 PDF'); return; }
+    tab.location.href = url;
+    // fallback：/FILES/*.pdf 不存在、只能開原文頁給律師手動轉存
+    if (kind === 'fallback' && detail) _showReaderToast(detail);
+  } catch (err) {
+    try { tab.close(); } catch {}
+    _showReaderToast(`取得 PDF 連結失敗：${err.message}`);
+  }
 });
 
 // Star toggle — optimistic update + DB persist
@@ -7388,7 +7583,21 @@ document.querySelectorAll('.rc-tab').forEach(btn => {
   btn.addEventListener('click', () => switchReaderTab(btn.dataset.rcTab));
 });
 document.addEventListener('keydown', e => {
-  if (e.key === 'Escape' && !document.getElementById('reader-card').classList.contains('hidden')) {
+  if (e.key !== 'Escape') return;
+  // 選取工具列 / 標記 popover 優先：若顯示中、ESC 只關它們、不關 reader
+  const tb = document.getElementById('rc-selection-toolbar');
+  const pop = document.getElementById('rc-highlight-popover');
+  if (tb && !tb.classList.contains('hidden')) {
+    tb.classList.add('hidden');
+    e.stopPropagation();
+    return;
+  }
+  if (pop && !pop.classList.contains('hidden')) {
+    pop.classList.add('hidden');
+    e.stopPropagation();
+    return;
+  }
+  if (!document.getElementById('reader-card').classList.contains('hidden')) {
     closeReaderCard();
     e.stopPropagation();  // don't also close search card
   }
@@ -9142,6 +9351,499 @@ function formatCitation(judgment) {
   if (!year || !type || !num) return `${court} ${judgment.case_id || ''}`;
   return `${court}${year}年度${type}字第${num}號判決意旨參照`;
 }
+
+// 律師引文複製用：產出「{court}{year}年度{type}字第{num}號{民事/刑事/行政/懲戒}{判決/裁定}參照」
+//   釋字：「司法院釋字第N號解釋參照」
+//   憲判字：「憲法法庭YYY年憲判字第N號判決參照」
+// 跟 formatCitation 差異：這裡優先用 parseCaseDisplay（支援中文格式化 case_id，多數 task_judgments 是這格式）
+// 並加入判決類型（民事判決/行政判決…），比列表 footer 的簡版多一層精確度
+function formatFullCitation(judgment) {
+  if (!judgment) return '';
+  const rawCid = String(judgment.case_id || '').trim();
+
+  // 舊釋字：「司法院釋字第N號」或「釋字第N號」
+  const interpMatch = rawCid.match(/^(?:司法院)?釋字第(\d+)號/);
+  if (interpMatch) {
+    return `司法院釋字第${interpMatch[1]}號解釋參照`;
+  }
+
+  // 憲判字：「YYY年憲判字第N號」/「憲法法庭YYY年憲判字第N號判決」
+  const conRulingMatch = rawCid.match(/(\d+)\s*年\s*憲判字第\s*(\d+)\s*號/);
+  if (conRulingMatch) {
+    return `憲法法庭${conRulingMatch[1]}年憲判字第${conRulingMatch[2]}號判決參照`;
+  }
+
+  const court = courtOf(judgment);
+
+  // 優先 parseCaseDisplay：多數 task_judgments.case_id 是「臺北高等行政法院...112年度訴字第1234號判決」格式
+  const parsed = parseCaseDisplay(rawCid);
+  if (parsed.caseNum) {
+    // caseType 可能是「民事判決」「行政裁定」或空字串；若空則 fallback 用「判決」
+    const docType = parsed.caseType || '判決';
+    return `${court}${parsed.caseNum}${docType}參照`;
+  }
+
+  // fallback：JID 逗號格式
+  const parts = rawCid.split(',');
+  if (parts.length >= 4) {
+    const [, year, type, num] = parts;
+    if (year && type && num) return `${court}${year}年度${type}字第${num}號判決參照`;
+  }
+
+  return `${court} ${rawCid}`;
+}
+
+// ═══════════════════════════════════════════════════════════
+//  Reader 選取工具列（複製 / 引文複製 / 標記）
+//  · mouseup 觸發、toolbar 浮在選取範圍上方
+//  · 黃底標記 persistent via server-side（GET/POST/DELETE /api/cases/{case_id}/highlights）
+//    DOM mark 保留 data-hl-id 以便點「取消標記」時 DELETE-by-id；跨裝置即時同步
+// ═══════════════════════════════════════════════════════════
+
+const _HIGHLIGHT_CTX_LEN = 20;  // 上下文比對字數
+
+async function _loadHighlights(caseId) {
+  if (!caseId) return [];
+  try {
+    const res = await apiFetch(`/api/cases/${encodeURIComponent(caseId)}/highlights`);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const arr = await res.json();
+    // Server 欄位 before_ctx/after_ctx 轉為前端慣用的 before/after
+    return arr.map(h => ({
+      id: h.id,
+      text: h.text,
+      before: h.before_ctx || '',
+      after: h.after_ctx || '',
+    }));
+  } catch (e) {
+    console.warn('[highlight] load failed:', e);
+    return [];
+  }
+}
+
+async function _addHighlight(caseId, entry) {
+  // POST、回 server-assigned id；throw on failure（呼叫端 try/catch toast）
+  const res = await apiFetch(`/api/cases/${encodeURIComponent(caseId)}/highlights`, {
+    method: 'POST',
+    body: JSON.stringify({
+      text: entry.text,
+      before: entry.before || '',
+      after: entry.after || '',
+    }),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  const { id } = await res.json();
+  return id;
+}
+
+async function _removeHighlight(caseId, highlightId) {
+  if (highlightId == null) return;  // local-only mark（不該發生、防禦）
+  const res = await apiFetch(
+    `/api/cases/${encodeURIComponent(caseId)}/highlights/${highlightId}`,
+    { method: 'DELETE' }
+  );
+  // 404 視為 idempotent 成功（已被刪）
+  if (!res.ok && res.status !== 404) throw new Error(`HTTP ${res.status}`);
+}
+
+// 把 #rc-text 所有 text nodes 串成 plain text + 記錄每段來源 node（用來定位匹配）
+function _collectTextNodes(root) {
+  const nodes = [];
+  let combined = '';
+  const offsets = [];  // 每個 text node 在 combined 字串中的起始 offset
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode(node) {
+      // 跳過已是 highlight 的 mark 內部、跳過 script/style
+      const parent = node.parentElement;
+      if (!parent) return NodeFilter.FILTER_REJECT;
+      if (parent.closest('.reader-user-highlight')) return NodeFilter.FILTER_REJECT;
+      if (parent.tagName === 'SCRIPT' || parent.tagName === 'STYLE') return NodeFilter.FILTER_REJECT;
+      return NodeFilter.FILTER_ACCEPT;
+    }
+  });
+  let node;
+  while ((node = walker.nextNode())) {
+    offsets.push(combined.length);
+    combined += node.nodeValue;
+    nodes.push(node);
+  }
+  return { nodes, offsets, combined };
+}
+
+// 在 {nodes, offsets, combined} 中找 entry（text + before/after context）的絕對 offset；
+// 找不到回 -1
+function _locateHighlight(collected, entry) {
+  const { combined } = collected;
+  const full = (entry.before || '') + entry.text + (entry.after || '');
+  // 先試 full context（最精確）
+  let idx = combined.indexOf(full);
+  if (idx !== -1) return idx + (entry.before || '').length;
+  // 退化：只用 before+text
+  if (entry.before) {
+    idx = combined.indexOf(entry.before + entry.text);
+    if (idx !== -1) return idx + entry.before.length;
+  }
+  // 再退化：text+after
+  if (entry.after) {
+    idx = combined.indexOf(entry.text + entry.after);
+    if (idx !== -1) return idx;
+  }
+  // 最後：text 單獨出現一次才採用（避免重複文字誤命中）
+  const first = combined.indexOf(entry.text);
+  if (first === -1) return -1;
+  const second = combined.indexOf(entry.text, first + 1);
+  if (second === -1) return first;
+  return -1;
+}
+
+// 在 text node 樹中把 [startOffset, startOffset+length) 範圍 wrap 成 mark.reader-user-highlight
+// 可能橫跨多個 text node — 逐 node 切割、各自獨立 wrap
+function _wrapRangeAsHighlight(collected, startOffset, length, entry) {
+  const { nodes, offsets } = collected;
+  const endOffset = startOffset + length;
+  // 收集會被影響的 nodes 與各自切點
+  const hits = [];
+  for (let i = 0; i < nodes.length; i++) {
+    const nodeStart = offsets[i];
+    const nodeEnd = nodeStart + nodes[i].nodeValue.length;
+    if (nodeEnd <= startOffset) continue;
+    if (nodeStart >= endOffset) break;
+    const localStart = Math.max(0, startOffset - nodeStart);
+    const localEnd = Math.min(nodes[i].nodeValue.length, endOffset - nodeStart);
+    hits.push({ node: nodes[i], localStart, localEnd });
+  }
+  // 由後往前切（避免前面切完後面 node 的 offset 漂移）
+  hits.reverse().forEach(({ node, localStart, localEnd }) => {
+    if (localStart === localEnd) return;
+    const full = node.nodeValue;
+    const before = full.slice(0, localStart);
+    const middle = full.slice(localStart, localEnd);
+    const after  = full.slice(localEnd);
+
+    const parent = node.parentNode;
+    if (!parent) return;
+
+    const mark = document.createElement('mark');
+    mark.className = 'reader-user-highlight';
+    mark.dataset.hlText   = entry.text;
+    mark.dataset.hlBefore = entry.before || '';
+    mark.dataset.hlAfter  = entry.after || '';
+    if (entry.id != null) mark.dataset.hlId = String(entry.id);
+    mark.textContent = middle;
+
+    const frag = document.createDocumentFragment();
+    if (before) frag.appendChild(document.createTextNode(before));
+    frag.appendChild(mark);
+    if (after) frag.appendChild(document.createTextNode(after));
+    parent.replaceChild(frag, node);
+  });
+}
+
+async function applyUserHighlights(caseId) {
+  const root = document.getElementById('rc-text');
+  if (!root) return;
+  const entries = await _loadHighlights(caseId);
+  if (!entries.length) return;
+  // 確認 reader 仍然開著同一筆 case（async 期間若律師切換判決、避免套到錯的 DOM）
+  if (!_readerJudgment || _readerJudgment.case_id !== caseId) return;
+  entries.forEach(entry => {
+    // 每次 re-collect：前一個 entry wrap 後 DOM 已變，collected 會失效
+    const collected = _collectTextNodes(root);
+    const offset = _locateHighlight(collected, entry);
+    if (offset < 0) return;  // 找不到（內容結構已變）就跳過
+    _wrapRangeAsHighlight(collected, offset, entry.text.length, entry);
+  });
+}
+
+// selection 相關狀態
+let _lastSelection = null;  // { text, range, rect }
+
+function _getSelectionInRcText() {
+  const sel = window.getSelection();
+  if (!sel || sel.rangeCount === 0 || sel.isCollapsed) return null;
+  const range = sel.getRangeAt(0);
+  const rcText = document.getElementById('rc-text');
+  if (!rcText) return null;
+  // 確認選取範圍在 #rc-text 內
+  if (!rcText.contains(range.commonAncestorContainer)) return null;
+  const text = sel.toString();
+  if (!text || !text.trim()) return null;
+  const rect = range.getBoundingClientRect();
+  if (rect.width === 0 && rect.height === 0) return null;
+  return { text, range: range.cloneRange(), rect };
+}
+
+// toolbar 位置：以「滑鼠最後釋放點」為 anchor，讓律師游標不用移太遠
+// 取代先前的「selection rect 中心」定位（多行選取時那個中心可能遠離游標）
+function _showSelectionToolbar(anchor) {
+  const info = _getSelectionInRcText();
+  const tb = document.getElementById('rc-selection-toolbar');
+  if (!tb) return;
+  if (!info) { tb.classList.add('hidden'); _lastSelection = null; return; }
+  _lastSelection = info;
+
+  // 主 anchor：mouseup 座標（傳入的 anchor）；沒有才 fallback 到 selection rect
+  let ax, ay;
+  if (anchor && typeof anchor.x === 'number' && typeof anchor.y === 'number') {
+    ax = anchor.x;
+    ay = anchor.y;
+  } else {
+    // keyboard-only selection 或其他路徑：fallback 用 selection 幾何
+    ax = info.rect.left + info.rect.width / 2;
+    ay = info.rect.top;
+  }
+
+  const TB_H = 36;     // toolbar 預估高度（實測 32-36px）
+  const GAP  = 10;     // 游標與 toolbar 間距
+  const PAD  = 8;      // 視窗邊緣保留
+
+  // 垂直 flip：若上方空間不夠放 toolbar、放到游標下方
+  const placeBelow = ay - TB_H - GAP < PAD;
+  if (placeBelow) {
+    tb.style.top = `${ay + GAP}px`;
+    tb.style.transform = 'translate(-50%, 0)';
+    tb.style.marginTop = '0';
+  } else {
+    tb.style.top = `${ay - GAP}px`;
+    tb.style.transform = 'translate(-50%, -100%)';
+    tb.style.marginTop = '0';
+  }
+  tb.style.left = `${ax}px`;
+  tb.classList.remove('hidden');
+
+  // 顯示後量實際寬度、做水平邊界 clamp（避免 toolbar 貼到視窗左右緣超出）
+  const rect = tb.getBoundingClientRect();
+  const vw = window.innerWidth;
+  if (rect.left < PAD) {
+    tb.style.left = `${ax + (PAD - rect.left)}px`;
+  } else if (rect.right > vw - PAD) {
+    tb.style.left = `${ax - (rect.right - vw + PAD)}px`;
+  }
+}
+
+function _hideSelectionToolbar() {
+  const tb = document.getElementById('rc-selection-toolbar');
+  if (tb) tb.classList.add('hidden');
+  _lastSelection = null;
+}
+
+function _hideHighlightPopover() {
+  const pop = document.getElementById('rc-highlight-popover');
+  if (pop) {
+    pop.classList.add('hidden');
+    pop._targetMark = null;
+  }
+}
+
+function _showHighlightPopover(mark) {
+  const pop = document.getElementById('rc-highlight-popover');
+  if (!pop) return;
+  const rect = mark.getBoundingClientRect();
+  pop.style.left = `${rect.left + rect.width / 2}px`;
+  pop.style.top  = `${rect.top}px`;
+  pop._targetMark = mark;
+  pop.classList.remove('hidden');
+}
+
+// 清除選取樣式（點了 toolbar 某按鈕後、避免 UI 殘留選取藍色）
+function _clearSelection() {
+  const sel = window.getSelection();
+  if (sel && sel.removeAllRanges) sel.removeAllRanges();
+}
+
+function _selActionCopy() {
+  if (!_lastSelection) return;
+  // 去除所有換行 / tab / 多空白，讓貼出去是一行
+  const cleaned = _lastSelection.text
+    .replace(/[\r\n\t]+/g, '')
+    .replace(/[ \u3000]+/g, ' ')
+    .trim();
+  navigator.clipboard.writeText(cleaned).then(() => {
+    _showReaderToast('已複製');
+  }).catch(() => {
+    _showReaderToast('複製失敗');
+  });
+  _hideSelectionToolbar();
+  _clearSelection();
+}
+
+function _selActionCite() {
+  if (!_lastSelection || !_readerJudgment) return;
+  const cleaned = _lastSelection.text
+    .replace(/[\r\n\t]+/g, '')
+    .replace(/[ \u3000]+/g, ' ')
+    .trim();
+  const cite = formatFullCitation(_readerJudgment);
+  const payload = `「${cleaned}」${cite}`;
+  navigator.clipboard.writeText(payload).then(() => {
+    _showReaderToast('已複製引文');
+  }).catch(() => {
+    _showReaderToast('複製失敗');
+  });
+  _hideSelectionToolbar();
+  _clearSelection();
+}
+
+function _selActionHighlight() {
+  if (!_lastSelection || !_readerJudgment) return;
+  const caseId = _readerJudgment.case_id || _readerCaseId;
+  if (!caseId) return;
+
+  const rcText = document.getElementById('rc-text');
+  if (!rcText) return;
+
+  // 用 selection 範圍在 collected text 中的實際 offset 抓 before/after context
+  // 比 selection.toString() + indexOf 穩：能處理選取內有換行或與 DOM 結構不完全一致的情況
+  const collected = _collectTextNodes(rcText);
+  const range = _lastSelection.range;
+
+  // 計算 range start / end 在 collected.combined 中的 offset
+  let startOffset = -1, endOffset = -1;
+  for (let i = 0; i < collected.nodes.length; i++) {
+    const n = collected.nodes[i];
+    if (n === range.startContainer) startOffset = collected.offsets[i] + range.startOffset;
+    if (n === range.endContainer)   endOffset   = collected.offsets[i] + range.endOffset;
+  }
+  // 若 start/end container 不是 text node（例如選取橫跨 elements），fallback 用 text search
+  if (startOffset < 0 || endOffset < 0 || startOffset >= endOffset) {
+    const selText = _lastSelection.text.replace(/[\r\n]+/g, '');
+    const idx = collected.combined.indexOf(selText);
+    if (idx < 0) { _showReaderToast('標記失敗'); _hideSelectionToolbar(); return; }
+    startOffset = idx;
+    endOffset   = idx + selText.length;
+  }
+
+  const selectedText = collected.combined.slice(startOffset, endOffset);
+  const before = collected.combined.slice(Math.max(0, startOffset - _HIGHLIGHT_CTX_LEN), startOffset);
+  const after  = collected.combined.slice(endOffset, endOffset + _HIGHLIGHT_CTX_LEN);
+
+  const entry = {
+    text: selectedText,
+    before,
+    after,
+  };
+  _hideSelectionToolbar();
+  _clearSelection();
+  // 先 POST 取得 server-assigned id、再 wrap DOM（帶 data-hl-id）
+  // 若網路失敗 → DOM 不 wrap、toast 讓律師重試
+  // 若 DOM 在 await 期間變動 → 不 wrap、server 已持久化、reader 重開時透過 applyUserHighlights 還原
+  (async () => {
+    let id;
+    try {
+      id = await _addHighlight(caseId, entry);
+    } catch (err) {
+      _showReaderToast(`標記儲存失敗：${err.message}`);
+      return;
+    }
+    entry.id = id;
+    // 律師可能在 await 期間已切換判決 / 關閉 reader、確認仍同 case 才 wrap
+    if (!_readerJudgment || _readerJudgment.case_id !== caseId) return;
+    // 重新 collect 再定位（不用舊的 startOffset、因它對應舊的 collected tree）
+    const fresh = _collectTextNodes(document.getElementById('rc-text'));
+    const idx = _locateHighlight(fresh, entry);
+    if (idx < 0) return;  // 極端情況：DOM 已變得 locate 不到。下次 reopen reader 會顯示
+    _wrapRangeAsHighlight(fresh, idx, selectedText.length, entry);
+  })();
+}
+
+// 點 highlight → 彈 popover
+function _onRcTextClick(e) {
+  const mark = e.target.closest('.reader-user-highlight');
+  if (mark) {
+    e.stopPropagation();
+    _showHighlightPopover(mark);
+    return;
+  }
+  // 點到其他地方：popover / toolbar 收起
+  _hideHighlightPopover();
+}
+
+function _onHlPopoverClick(e) {
+  const btn = e.target.closest('[data-hl-act]');
+  if (!btn) return;
+  const pop = document.getElementById('rc-highlight-popover');
+  const mark = pop && pop._targetMark;
+  if (!mark) { _hideHighlightPopover(); return; }
+  if (btn.dataset.hlAct === 'remove') {
+    const caseId = (_readerJudgment && _readerJudgment.case_id) || _readerCaseId;
+    const hlId = mark.dataset.hlId ? parseInt(mark.dataset.hlId, 10) : null;
+    // Optimistic UI：先 unwrap DOM、再 async DELETE server-side
+    // 失敗時 toast 但不還原 DOM（低頻 edge case、律師重開 reader 會重新載入真實狀態）
+    const parent = mark.parentNode;
+    if (parent) {
+      while (mark.firstChild) parent.insertBefore(mark.firstChild, mark);
+      parent.removeChild(mark);
+      parent.normalize();
+    }
+    if (hlId != null) {
+      _removeHighlight(caseId, hlId).catch(err => {
+        console.warn('[highlight] remove persist failed:', err);
+        _showReaderToast('取消標記已反映、但伺服器同步失敗');
+      });
+    }
+  }
+  _hideHighlightPopover();
+}
+
+function _onToolbarClick(e) {
+  const btn = e.target.closest('[data-sel-act]');
+  if (!btn) return;
+  e.stopPropagation();
+  const act = btn.dataset.selAct;
+  if (act === 'copy') _selActionCopy();
+  else if (act === 'cite') _selActionCite();
+  else if (act === 'highlight') _selActionHighlight();
+}
+
+(function initReaderSelectionToolbar() {
+  const tb = document.getElementById('rc-selection-toolbar');
+  const pop = document.getElementById('rc-highlight-popover');
+  const rcText = document.getElementById('rc-text');
+  if (!tb || !pop || !rcText) return;
+
+  tb.addEventListener('mousedown', e => e.preventDefault());   // 點按鈕不要讓 selection 消失
+  tb.addEventListener('click', _onToolbarClick);
+
+  pop.addEventListener('mousedown', e => e.preventDefault());
+  pop.addEventListener('click', _onHlPopoverClick);
+
+  // mouseup on rc-text 觸發 toolbar；用 document 捕獲避免 click 後 selection 已 clear
+  document.addEventListener('mouseup', (e) => {
+    // 下一輪 tick 讓 selection 定下來再量 rect
+    // 把 mouseup 的 viewport 座標當 anchor 傳入、toolbar 就會浮在滑鼠釋放點附近
+    const anchor = { x: e.clientX, y: e.clientY };
+    setTimeout(() => _showSelectionToolbar(anchor), 0);
+  });
+
+  // 點 #rc-text（包含 highlight）→ popover 邏輯
+  rcText.addEventListener('click', _onRcTextClick);
+
+  // 點 toolbar/popover 外面 → 收起
+  document.addEventListener('mousedown', e => {
+    if (!tb.classList.contains('hidden') && !tb.contains(e.target)) {
+      // 留給 mouseup 重估（可能是新的 selection）
+      // 這裡只是先備份：若 mouseup 沒產生 selection、就 hide
+      setTimeout(() => {
+        if (!_getSelectionInRcText()) _hideSelectionToolbar();
+      }, 0);
+    }
+    if (!pop.classList.contains('hidden') && !pop.contains(e.target)
+        && !e.target.closest('.reader-user-highlight')) {
+      _hideHighlightPopover();
+    }
+  });
+
+  // 捲動 reader 時、toolbar/popover 跟著 viewport 漂走：關掉重來
+  const scrollEl = document.getElementById('rc-scroll');
+  if (scrollEl) {
+    scrollEl.addEventListener('scroll', () => {
+      _hideSelectionToolbar();
+      _hideHighlightPopover();
+    }, { passive: true });
+  }
+
+  // ESC 行為由 reader-card 的 keydown 集中處理（toolbar > popover > reader 優先序）
+})();
 
 function toggleSummaryCard() {
   _summaryOpen = !_summaryOpen;

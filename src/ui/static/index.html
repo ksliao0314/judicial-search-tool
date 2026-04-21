@@ -716,6 +716,39 @@
         <div id="rc-scroll" class="rc-scroll flex-1 overflow-y-auto" style="min-height:0">
           <div id="rc-text" class="px-10 py-6 relative max-w-[52rem] mx-auto"></div>
         </div>
+
+        <!-- 選取文字浮動工具列（複製 / 引文複製 / 標記）— 預設隱藏、mouseup 後動態定位 -->
+        <div id="rc-selection-toolbar"
+             class="hidden fixed z-[100] bg-parchment border border-warm-300 rounded-sm shadow-lg
+                    text-xs font-mono flex items-stretch overflow-hidden"
+             style="transform: translate(-50%, -100%); margin-top: -6px;">
+          <button data-sel-act="copy"
+                  class="px-3 py-1.5 text-warm-600 hover:bg-seal/10 hover:text-seal transition-colors border-r border-warm-200">
+            複製
+          </button>
+          <button data-sel-act="cite"
+                  class="px-3 py-1.5 text-warm-600 hover:bg-seal/10 hover:text-seal transition-colors border-r border-warm-200">
+            引文複製
+          </button>
+          <button data-sel-act="highlight"
+                  class="px-3 py-1.5 text-warm-600 hover:bg-seal/10 hover:text-seal transition-colors">
+            <span class="inline-flex items-center gap-1">
+              <span style="display:inline-block;width:10px;height:10px;background:rgba(255,230,0,.5);border:1px solid rgba(0,0,0,.15)"></span>
+              標記
+            </span>
+          </button>
+        </div>
+
+        <!-- 標記 popover（點 highlight 彈出、「取消標記」按鈕） -->
+        <div id="rc-highlight-popover"
+             class="hidden fixed z-[100] bg-parchment border border-warm-300 rounded-sm shadow-lg
+                    text-xs font-mono"
+             style="transform: translate(-50%, -100%); margin-top: -6px;">
+          <button data-hl-act="remove"
+                  class="px-3 py-1.5 text-warm-600 hover:bg-red-50 hover:text-red-600 transition-colors">
+            取消標記
+          </button>
+        </div>
       </div>
 
       <!-- 歷史分析 panel：跨 task 此 case_id 被分析過的清單 -->
