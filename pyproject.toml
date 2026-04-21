@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "judgment-search"
-version = "1.0.3"
+version = "1.0.4"
 description = "司法院判決 AI 篩選工具"
 requires-python = ">=3.11"
 # 注意：mcp-taiwan-legal-db 刻意不列在 dependencies。

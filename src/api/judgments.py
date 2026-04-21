@@ -21,7 +21,6 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from src.db import database as db
-from src.pipeline.pdf_generator import generate_judgment_pdf
 
 logger = logging.getLogger(__name__)
 
@@ -256,26 +255,9 @@ def _maybe_attach_interp_sections(judgment: dict) -> None:
         return
 
 
-@router.get("/tasks/{task_id}/judgments/{case_id}/pdf")
-async def download_judgment_pdf(task_id: str, case_id: str):
-    """下載單筆判決 PDF。"""
-    judgments = await db.get_task_judgments(task_id)
-    judgment = None
-    for j in judgments:
-        if j["case_id"] == case_id:
-            judgment = j
-            break
-    if not judgment:
-        raise HTTPException(status_code=404, detail="Judgment not found")
-
-    pdf_bytes = generate_judgment_pdf(judgment)
-    # 用字號做檔名（去掉全形空白）
-    safe_name = (case_id or "judgment").replace('\u3000', '').replace(' ', '')[:50]
-    return Response(
-        content=pdf_bytes,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{safe_name}.pdf"'},
-    )
+# 舊的 GET /tasks/{id}/judgments/{cid}/pdf endpoint（用 reportlab 自產 PDF）已移除：
+# v1.0.3 起所有單筆 PDF 下載改走 /api/pdf-url 取司法院原版 URL（見下）、前端用 window.open。
+# reportlab 依賴一併拿掉、省掉 ~12 MB 冷依賴。
 
 
 @router.get("/pdf-url")
