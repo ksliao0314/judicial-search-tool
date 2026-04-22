@@ -38,18 +38,24 @@ function updateCardStuckWarning(taskId) {
   const etaEl = document.getElementById('card-progress-eta');
   if (!etaEl) return;
 
-  // 未收到過 SSE → 用 worker age 當 gap；收到過 → 用距上次進度時間
-  const secSinceProgress = _lastProgressAt ? Math.floor((Date.now() - _lastProgressAt) / 1000) : age;
+  const warnEl = document.getElementById('card-stuck-warn');
 
-  let warnEl = document.getElementById('card-stuck-warn');
+  // 沒有真正的 last-activity 時間戳就不警告。
+  // worker age（從啟動以來時間）≠ LLM idle 時間；把 age 當 fallback 會導致律師剛打開
+  // State B 時看到誤導的「LLM 已 N 秒未回應」，數秒後第一個 SSE 到才消失。
+  // 改成：只在收到過 SSE（_lastProgressAt 已設）且距今 >= 90s 才警告。
+  if (!_lastProgressAt) { warnEl?.remove(); return; }
+
+  const secSinceProgress = Math.floor((Date.now() - _lastProgressAt) / 1000);
   if (secSinceProgress >= _STALL_THRESHOLD) {
-    if (!warnEl) {
-      warnEl = document.createElement('div');
-      warnEl.id = 'card-stuck-warn';
-      warnEl.className = 'mt-3 text-[11px] font-mono text-red-500';
-      etaEl.parentElement?.appendChild(warnEl);
+    let el = warnEl;
+    if (!el) {
+      el = document.createElement('div');
+      el.id = 'card-stuck-warn';
+      el.className = 'mt-3 text-[11px] font-mono text-red-500';
+      etaEl.parentElement?.appendChild(el);
     }
-    warnEl.textContent = `⚠ LLM 已 ${secSinceProgress} 秒未回應，若持續無反應請按「中止分析」`;
+    el.textContent = `⚠ LLM 已 ${secSinceProgress} 秒未回應，若持續無反應請按「中止分析」`;
   } else {
     warnEl?.remove();
   }
@@ -2986,11 +2992,14 @@ function setCardState(s) {
       searchBar.classList.add('hidden');
     }
   } else if (s === 'b') {
-    // 設計版：前面加藍色 pulse dot
+    // 極簡 header：只顯示狀態、不重複放 kw。
+    // kw 與中間 question block 視覺上太像、會讓律師誤以為重複；
+    // 進度資訊（N/M 筆、tokens、elapsed）都在下方 progress block、header 再塞只會稀釋視線。
+    // 律師已點進卡片、不需 header 再提醒「這是哪個任務」。
     hdr.innerHTML = `<span class="inline-flex items-center gap-2">
       <span class="pulse-dot w-1.5 h-1.5 rounded-full inline-block"
             style="background:var(--d-accent)"></span>
-      AI 分析中 · ${escHtml(kw)}
+      AI 分析中
     </span>`;
     searchBar.classList.add('hidden');
   } else if (s === 'c') {
@@ -3846,6 +3855,31 @@ function renderCardProgress(question) {
   const _tick = () => {
     if (state.card.state !== 'b') { clearInterval(state.card._agoTimer); return; }
     const now = Date.now();
+
+    // ── Baseline 修正邏輯 ───────────────────────────────
+    // 原本 elapsed = now - created_at、但 created_at 是 wall-clock 起點：
+    //   · 電腦睡眠 8 hr 回來、elapsed 跳 +8hr（實際 analysis 沒在跑）
+    //   · 律師按中止到按續跑之間、elapsed 繼續 tick（實際暫停）
+    //   · 伺服器 crash 到重啟之間、elapsed 繼續 tick（實際沒在跑）
+    // 以下兩道防線把 baseline 往後推、讓 elapsed 只反映「analysis 實際在跑」的時間：
+
+    // [1] Delta guard：正常 tick ≈ 1000ms、> 5000ms 代表系統睡眠 / tab throttle
+    //     把 baseline 往後推 (delta - 1s)、該 gap 視為不活動
+    const lastTick = state.card._lastTickMs;
+    if (lastTick && state.card._analysisStartMs) {
+      const delta = now - lastTick;
+      if (delta > 5000) state.card._analysisStartMs += (delta - 1000);
+    }
+    state.card._lastTickMs = now;
+
+    // [2] Status guard：analysis 非 running/pending（failed / partial / cancelled / done）
+    //     每秒把 baseline 同步 +1s、凍結 elapsed 顯示（不累加暫停期間）
+    const curA = (state.analyses || []).find(x => x.id === state.card.analysisId);
+    const isActive = !curA || curA.status === 'running' || curA.status === 'pending';
+    if (!isActive && state.card._analysisStartMs) {
+      state.card._analysisStartMs += 1000;
+    }
+
     const timeEl2 = document.getElementById('card-live-last-time');
     const agoEl2 = document.getElementById('card-live-ago');
     if (timeEl2) {
@@ -4030,9 +4064,13 @@ function appendLiveFeed(results) {
   if (placeholder) placeholder.remove();
 
   const now = Date.now();
-  const elapsed = state.card._lastFeedTime
+  const rawElapsed = state.card._lastFeedTime
     ? Math.round((now - state.card._lastFeedTime) / 1000)
     : null;
+  // elapsed > 300s 通常源於 SSE 斷線期間累積的 gap（律師切 tab、Chrome throttle、
+  // 網路抖一下等），不是真正的 Claude 批次間隔。顯示會誤導（看起來像某筆判決
+  // Claude 跑了 2.5 小時）。Rate-limit worst case 批次間隔 ~90s、300s 留足緩衝。
+  const elapsed = (rawElapsed !== null && rawElapsed <= 300) ? rawElapsed : null;
   state.card._lastFeedTime = now;
 
   // 更新「上次回傳」時間
@@ -4134,13 +4172,18 @@ document.getElementById('card-abort-analyze').addEventListener('click', async ()
 });
 
 // 判定：現在這階段按中止是否會產生可查看的 partial synthesis
-// scoring 階段 + 實際「命中」≥ 3 筆才走 graceful 路徑；命中 < 3 跑 synthesis 也
+// 實際「命中」≥ 3 筆就走 graceful 路徑；命中 < 3 跑 synthesis 也
 // 產不出有用結果（會得到「精讀後沒有判決有論述此問題」的空 partial），走 disruptive。
+//
+// 不檢查 progressPhase：「邊快取邊分析」模式下 phase 在 fetch ↔ read 間來回跳，
+// 但已分析完成的 match 本身是持久的 — 不該因為當下正在 fetch 下一批而收回
+// 「中止並查看目前結果」的選項（backend /abort 看 match_count、不看 phase）。
+// 唯一要排除 synth：此時已在產 synthesis、中止它沒意義。
 function _canGracefulAbort() {
   const info = state.bell.tasks.get(state.card.taskId);
   const phase = info?.progressPhase;
   const matchCount = state.card._matchCount || 0;
-  return (phase === 'read' || phase === 'screen') && matchCount >= 3;
+  return matchCount >= 3 && phase !== 'synth';
 }
 
 // Graceful abort — 保留已分析的 ≥3 筆命中、立即進 partial synthesis、切 State C
@@ -4211,6 +4254,18 @@ function _clearAbortUI() {
 function _updateAbortButtonLabel() {
   const btn = document.getElementById('card-abort-analyze');
   if (!btn || btn.classList.contains('hidden')) return;
+
+  // 正在產出結果時鎖住按鈕：此時 synthesis 已在跑、再按 /abort 會讓 backend
+  // fast_path 再 spawn 一個 synthesis task、兩條 concurrent 寫 DB 造成 race
+  const info = state.bell.tasks.get(state.card.taskId);
+  const phase = info?.progressPhase;
+  if (phase === 'synth') {
+    btn.disabled = true;
+    btn.classList.add('opacity-60');
+    btn.textContent = 'AI 綜合分析中…';
+    return;
+  }
+
   if (btn.disabled) return;  // 中止進行中時不覆寫 timer label
   btn.textContent = _canGracefulAbort() ? '中止並查看目前結果' : '中止分析';
 }
@@ -8312,12 +8367,14 @@ function subscribeBellTask(taskId) {
   src.onerror = () => {
     src.close();
     state.bell.sseConnections.delete(taskId);
-    // 分析 SSE 斷線 → 恢復卡片到 State A
-    if (state.card.open && state.card.taskId === taskId && state.card.state === 'b') {
-      setCardState('a');
-      document.getElementById('card-submit-analyze').disabled = false;
-      document.getElementById('card-submit-analyze').textContent = 'AI　分　析';
-    }
+    // SSE 斷線 ≠ 分析結束。不切 State A、避免以下情境誤把律師的進度畫面打回篩選頁：
+    //   · Chrome tab throttle（背景 tab 慢慢 starve connection，最常見）
+    //   · 瀏覽器 keepalive timeout（idle 30s-5min 後主動斷）
+    //   · 網路 flap / VPN 切換
+    //   · macOS 睡眠醒來
+    // 真正的分析結束走專屬 event（analysis_done / analysis_failed / stage3_cancelled /
+    // stage3_partial_done），各自 handler 會正確切 state。
+    // 律師重新開卡片時會 re-subscribe SSE + 從 DB 拉最新狀態。
     renderTaskLists();
   };
 }

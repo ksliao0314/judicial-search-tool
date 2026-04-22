@@ -1619,21 +1619,47 @@ async def run_analysis_v2(
 
                 # score > 0 → 立刻接 Round 2（12K budget）— step 2 of 2
                 if r1["score"] and r1["score"] > 0:
-                    r2 = await _call_and_parse(None, do_discovery=True)
-                    await db.update_analysis_result(
-                        analysis_id=analysis_id, case_id=case_id,
-                        match=r2["match"], score=r2["score"],
-                        excerpt=r2["excerpt"], reason=r2["reason"],
-                    )
-                    # R1 已加 match=1。若 R2 精讀後 score 退回 0，補一筆 -1 退回
-                    # match_count；否則 0 不動。這樣 match_count 準確反映 R2 最終分數，
-                    # 律師看「相關 N 筆」不會虛報。
-                    r2_score = r2["score"] or 0
-                    match_compensation = 0 if r2_score > 0 else -1
-                    await db.increment_analysis_progress(
-                        analysis_id, completed_delta=1, match_delta=match_compensation,
-                    )
-                    return r2
+                    try:
+                        r2 = await _call_and_parse(None, do_discovery=True)
+                        await db.update_analysis_result(
+                            analysis_id=analysis_id, case_id=case_id,
+                            match=r2["match"], score=r2["score"],
+                            excerpt=r2["excerpt"], reason=r2["reason"],
+                        )
+                        # R1 已加 match=1。若 R2 精讀後 score 退回 0，補一筆 -1 退回
+                        # match_count；否則 0 不動。這樣 match_count 準確反映 R2 最終分數，
+                        # 律師看「相關 N 筆」不會虛報。
+                        r2_score = r2["score"] or 0
+                        match_compensation = 0 if r2_score > 0 else -1
+                        await db.increment_analysis_progress(
+                            analysis_id, completed_delta=1, match_delta=match_compensation,
+                        )
+                        return r2
+                    except Exception as r2_exc:
+                        # Round 2 失敗（JSONDecodeError / rate limit 重試耗盡 / timeout）
+                        # 關鍵：R1 已寫 row + 加 completed + 加 match。這裡只 UPDATE 原 row
+                        # 加 R2 失敗註記、不再 INSERT 第二筆 error row（v1.0.5 前的 bug 來源）
+                        # 也只補 +1 completed（代表 R2 pass 結束）、不動 match_count（R1 的保留）
+                        logger.warning(
+                            "stage3_v2 Round 2 case %s 失敗、保留 R1 結果：%s",
+                            case_id, r2_exc,
+                        )
+                        r2_err_msg = str(r2_exc)[:150]
+                        merged_reason = (
+                            f"{r1['reason']} ⟨R2 精讀失敗：{r2_err_msg}⟩"
+                        )
+                        try:
+                            await db.update_analysis_result(
+                                analysis_id=analysis_id, case_id=case_id,
+                                match=r1["match"], score=r1["score"],
+                                excerpt=r1["excerpt"], reason=merged_reason,
+                            )
+                            await db.increment_analysis_progress(
+                                analysis_id, completed_delta=1, match_delta=0,
+                            )
+                        except Exception:
+                            pass
+                        return r1
                 # score=0 → skip Round 2，補 step 2 的 completed（進度條準確到 100%）
                 await db.increment_analysis_progress(
                     analysis_id, completed_delta=1, match_delta=0,

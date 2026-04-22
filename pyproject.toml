@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "judgment-search"
-version = "1.0.4"
+version = "1.0.5"
 description = "司法院判決 AI 篩選工具"
 requires-python = ">=3.11"
 # 注意：mcp-taiwan-legal-db 刻意不列在 dependencies。
@@ -29,6 +29,15 @@ dev = [
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
     "pytest-httpx>=0.32.0",
+]
+# macOS 選單列 monitor + icon 工具（tools/）的執行依賴
+# rumps:  menu bar app framework
+# Pillow: 給 tools/make_icon.py 生成 AppIcon.icns 用（commit 的 .icns 改設計時才需要）
+# 安裝：pip install -e ".[monitor]"  （僅 macOS 需要）
+monitor = [
+    "rumps>=0.4.0",
+    "requests>=2.28.0",
+    "Pillow>=10.0.0",
 ]
 
 [tool.hatch.build.targets.wheel]

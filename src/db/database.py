@@ -165,6 +165,47 @@ async def init_db() -> None:
             "ON task_judgments(case_id, parser_version, fetched_at)"
         )
 
+        # 遷移 14（v1.0.5）：analysis_results (analysis_id, case_id) 去重 + UNIQUE 約束
+        # Bug：v1.0.5 前兩階段評分 Round 2 失敗時、backend 會另寫一筆 match='error' row、
+        #      同 case 變成兩筆 row、completed 被多算、display「N/M」會超過 total。
+        # Fix：code 層已改成 R2 失敗時 UPDATE 既有 row（保留 R1 結果 + 加失敗註記）；
+        #      這裡的 migration 一次性清舊 dupe + 加 UNIQUE index 防未來 regression。
+        cursor = await db.execute(
+            "SELECT name FROM sqlite_master "
+            "WHERE type='index' AND name='idx_ar_analysis_case_unique'"
+        )
+        if not await cursor.fetchone():
+            # 清 dupe step 1：同 (analysis_id, case_id) 有 error + 非 error 時、刪 error 那筆
+            await db.execute("""
+                DELETE FROM analysis_results
+                WHERE id IN (
+                    SELECT ar1.id FROM analysis_results ar1
+                    WHERE ar1.match = 'error'
+                    AND EXISTS (
+                        SELECT 1 FROM analysis_results ar2
+                        WHERE ar2.analysis_id = ar1.analysis_id
+                        AND ar2.case_id = ar1.case_id
+                        AND ar2.match != 'error'
+                    )
+                )
+            """)
+            # 清 dupe step 2：極罕見的多筆非 error 情況（手動資料汙染等）、只保留 id 最大的
+            await db.execute("""
+                DELETE FROM analysis_results
+                WHERE id NOT IN (
+                    SELECT MAX(id) FROM analysis_results
+                    GROUP BY analysis_id, case_id
+                )
+            """)
+            # 加 UNIQUE index（belt+suspenders：code fix + schema guard 雙保險）
+            await db.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_ar_analysis_case_unique "
+                "ON analysis_results(analysis_id, case_id)"
+            )
+            logger.info(
+                "遷移：analysis_results 清 dupe + 加 UNIQUE(analysis_id, case_id)"
+            )
+
         await db.commit()
     logger.info("資料庫初始化完成：%s", DB_PATH)
 

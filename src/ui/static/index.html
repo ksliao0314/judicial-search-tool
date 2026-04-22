@@ -323,7 +323,7 @@
       <!-- Card header (shared across states) -->
       <div class="shrink-0">
         <div class="flex items-center gap-4 px-5 py-3.5 border-b border-warm-200">
-          <h2 id="card-header-text" class="font-serif text-base text-ink font-normal shrink-0"></h2>
+          <h2 id="card-header-text" class="font-serif text-base text-ink font-normal min-w-0 flex-1"></h2>
           <!-- State C: 關鍵字 chip 放在 header 中段，節省側欄空間；其他 state 時隱藏 -->
           <div id="card-header-keyword-chip"
                class="hidden min-w-0 flex-1 flex flex-wrap items-center gap-x-2 gap-y-1"></div>
@@ -460,7 +460,10 @@
       </div><!-- /card-state-a -->
 
       <!-- ─── State B: Progress ─── -->
-      <div id="card-state-b" class="hidden flex-1 flex flex-col px-7 py-6" aria-live="polite">
+      <!-- min-h-0 必要：feed 長時（60+ 筆）state-B 的 natural height 會超過 85vh、
+           card-inner overflow:hidden 會把底部的中止按鈕 + hint 切掉。加 min-h-0 讓
+           state-B 的 flex-1 正確按 parent 分配尺寸、不用 content-size 撐開 -->
+      <div id="card-state-b" class="hidden flex-1 min-h-0 flex flex-col px-7 py-6" aria-live="polite">
         <!-- Question reminder（設計版大 serif italic）-->
         <p id="card-progress-question" class="progress-question-b"></p>
 
@@ -483,7 +486,10 @@
             <span id="card-live-last-time" class="text-[10.5px] font-mono text-warm-400"></span>
             <span id="card-live-ago" class="text-[10.5px] font-mono text-warm-400"></span>
           </div>
-          <div id="card-live-feed" class="flex-1 overflow-y-auto pt-1 space-y-1.5" style="max-height:260px"></div>
+          <!-- flex-1 + min-h-0 讓 feed 自動吃「剩餘」空間、不再用 max-height:260px 硬撐
+               （舊設計在律師螢幕短 + 有 stuck warning 時、feed 吃 260 會把下面的中止按鈕 +
+               hint 擠出 85vh overflow:hidden 範圍切掉）-->
+          <div id="card-live-feed" class="flex-1 min-h-0 overflow-y-auto pt-1 space-y-1.5"></div>
         </div>
 
         <!-- Abort button（設計版紅框 + 淡紅底）-->
@@ -493,7 +499,7 @@
 
         <!-- Hint -->
         <p class="mt-2 text-[11px] text-warm-400 font-serif italic text-center leading-relaxed">
-          可暫時關閉此畫面，完成後會在右上角鈴鐺提示。若 Claude 回應較慢，系統會自動重試。
+          可暫時關閉此畫面，任務將繼續進行，並於完成後通知。若 Claude 回應較慢，系統會自動重試。
         </p>
       </div><!-- /card-state-b -->
 

@@ -98,6 +98,8 @@ CREATE TABLE IF NOT EXISTS analysis_results (
 
 CREATE INDEX IF NOT EXISTS idx_ar_analysis ON analysis_results(analysis_id);
 CREATE INDEX IF NOT EXISTS idx_ar_score    ON analysis_results(analysis_id, score DESC);
+-- UNIQUE(analysis_id, case_id) 在 init_db 遷移 14 後建立、原因：
+-- pre-v1.0.5 DB 可能含雙胞胎 row、要先清 dupe 才能加 UNIQUE、所以不能放這裡（fresh install 也不會不一致）
 
 -- 事務所同義詞字典（L1 資產）：每次使用者 keyword 展開的結果都累積進來，
 -- 經 corpus verification + 律師 accept/reject 後變成高信度條目。
