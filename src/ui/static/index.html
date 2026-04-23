@@ -891,6 +891,61 @@
   </div>
 </div>
 
+<!-- ══════════════════════════════════════════════
+     下載失敗判決清單 modal — 列 skipped case_ids + 全部重試
+══════════════════════════════════════════════ -->
+<div id="skipped-modal-backdrop" class="hidden fixed inset-0 z-[45]"
+     style="background:rgba(0,0,0,.4);backdrop-filter:blur(2px)"></div>
+<div id="skipped-modal-card" class="hidden fixed inset-0 z-[55] flex items-start justify-center pointer-events-none"
+     role="dialog" aria-modal="true" aria-label="下載失敗判決清單" style="padding-top:60px">
+  <div class="pointer-events-auto bg-parchment border border-warm-200 flex flex-col fade-in"
+       style="width:560px;max-height:72vh;box-shadow:0 8px 40px rgba(0,0,0,.18)">
+    <div class="shrink-0 flex items-center justify-between px-5 py-3.5 border-b border-warm-200">
+      <h2 class="font-serif text-base text-ink">
+        <span id="skipped-modal-count">-</span> 筆下載失敗未分析
+      </h2>
+      <button id="skipped-modal-close" aria-label="關閉"
+        class="text-warm-400 hover:text-ink transition-colors w-7 h-7 flex items-center justify-center rounded-sm">
+        <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>
+        </svg>
+      </button>
+    </div>
+
+    <!-- Description -->
+    <div class="shrink-0 px-5 py-3 border-b border-warm-200 bg-warm-50/50 text-xs text-warm-500 leading-relaxed font-serif">
+      這些判決在抓取時遇到司法院暫時性錯誤（WAF throttle、MCP 子程序短暫卡頓等）、原地 3 次重試後放棄。
+      按「全部重試」可重抓 + 補分析（經驗約 80% 救得回）；少數仍失敗的可透過右側連結到司法院原文手動查看。
+    </div>
+
+    <!-- Case list -->
+    <div id="skipped-modal-list" class="flex-1 overflow-y-auto px-5 py-3 font-mono text-xs space-y-0.5">
+      <!-- JS 填充 -->
+    </div>
+
+    <!-- Footer -->
+    <div class="shrink-0 flex items-center justify-between px-5 py-3 border-t border-warm-200 gap-3">
+      <div id="skipped-modal-status" class="text-xs text-warm-500 font-mono flex-1 min-w-0"></div>
+      <div class="flex gap-2 shrink-0">
+        <button id="skipped-modal-cancel" type="button"
+          class="text-xs font-serif text-warm-500 hover:text-ink px-3 py-1.5 transition-colors">
+          關閉
+        </button>
+        <!-- 重試成功後、若有新 match 則顯示（自動 enable）— 直接跳 reSynthesis 不用找 🔄 icon -->
+        <button id="skipped-modal-resynth" type="button"
+          class="hidden text-xs font-serif text-parchment bg-seal hover:bg-seal-dim disabled:opacity-50 disabled:cursor-not-allowed px-4 py-1.5 transition-colors rounded-sm">
+          重新生成總結
+        </button>
+        <button id="skipped-modal-retry" type="button"
+          class="text-xs font-serif text-parchment bg-seal hover:bg-seal-dim disabled:opacity-50 disabled:cursor-not-allowed px-4 py-1.5 transition-colors rounded-sm">
+          全部重試
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Legacy overlay stubs — JS 仍引用，移除會 null error -->
 <div class="hidden" aria-hidden="true">
   <div id="followup-overlay"></div> <div id="followup-close"></div> <div id="followup-question"></div> <div id="fu-reasoning"></div> <input type="checkbox" id="fu-main"> <div id="fu-facts"></div> <input type="checkbox" id="fu-fulltext"> <div id="followup-submit"></div> <div id="followup-cancel"></div> <div id="stage3-overlay"></div> <div id="stage3-close"></div> <div id="stage3-question"></div> <div id="stage3-read-facts"></div> <div id="stage3-cost-count"></div> <div id="stage3-cost-tokens"></div> <div id="stage3-cost-time"></div> <div id="stage3-cancel"></div> <div id="stage3-submit"></div> <div id="expand-overlay"></div> <div id="expand-close"></div> <div id="expand-content"></div> <div id="expand-cancel"></div> <div id="expand-skip"></div> <div id="expand-confirm"></div> <textarea id="semantic-search"></textarea>

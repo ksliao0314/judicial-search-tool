@@ -74,6 +74,7 @@ CREATE TABLE IF NOT EXISTS analyses (
     narrow_state  TEXT,               -- Stage 3 narrow 條件（JSON：court_tiers / year_from / year_to / case_types）
     synthesis     TEXT,               -- Stage 3 v2：全部精讀完的總結（JSON: {total_relevant, consensus, summary}）
     synthesis_is_preliminary INTEGER DEFAULT 0,  -- 1 = 初步 synthesis（還在跑 missing judgments 的 retry），0 = 最終版
+    skipped_case_ids TEXT,             -- stage2.5 fetch 失敗的 case_ids（JSON list、NULL = 無 skip）；供「手動重試」用
     status        TEXT NOT NULL,      -- pending | running | done | failed
     total         INTEGER,
     completed     INTEGER DEFAULT 0,

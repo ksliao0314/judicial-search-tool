@@ -59,6 +59,13 @@ RPM_LIMIT = HAIKU_RPM_LIMIT
 CONCURRENCY = 8
 MAX_CLAUDE_RETRIES = 3
 
+# Scoring per-judgment max_tokens。舊版 512 太緊：prompt 要求 JSON 含 position(60字)
+# + excerpt(150字) + reason(80字) 中文、實測 ~680 tokens 才寫完。512 限下 log
+# 觀察到 37.6% 回應 stop=max_tokens 截斷、JSONDecodeError 觸發重試、拖慢 3-5 倍。
+# 升 1024 給 50% buffer、多 500 tok × $4/MTok = $0.002/call worst case、
+# 668 筆任務最大多花 ~$2.6；換掉重試成本划算。
+_SCORING_MAX_TOKENS = 1024
+
 # Scoring 走 Haiku
 _haiku_itpm_bucket = TokenBucket(rate_per_minute=HAIKU_ITPM_LIMIT)
 _haiku_rpm_bucket = TokenBucket(rate_per_minute=HAIKU_RPM_LIMIT)
@@ -567,7 +574,7 @@ async def _call_claude(
         try:
             response = await client.messages.create(
                 model=MODEL_SCORING,
-                max_tokens=512,
+                max_tokens=_SCORING_MAX_TOKENS,
                 system=[
                     {
                         "type": "text",
@@ -661,7 +668,7 @@ async def _call_claude_v2(
         try:
             response = await client.messages.create(
                 model=MODEL_SCORING,
-                max_tokens=512,
+                max_tokens=_SCORING_MAX_TOKENS,
                 system=[{"type": "text", "text": SYSTEM_PROMPT,
                          "cache_control": {"type": "ephemeral"}}],
                 messages=[{"role": "user", "content": prompt}],

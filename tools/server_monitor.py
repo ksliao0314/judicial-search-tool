@@ -55,7 +55,8 @@ logger = logging.getLogger(__name__)
 class ServerMonitor(rumps.App):
     def __init__(self) -> None:
         # quit_button=None：防止誤按 Cmd+Q；要退出從 menu「Quit Monitor」
-        super().__init__("⚪", quit_button=None)
+        # 加「判」prefix 讓選單列 icon 在 MBP 劉海機上更容易被看見（純 emoji 小又素）
+        super().__init__("判 ⚪", quit_button=None)
 
         self.status_item = rumps.MenuItem("狀態偵測中…")
         self.progress_item = rumps.MenuItem("—")
@@ -123,6 +124,7 @@ class ServerMonitor(rumps.App):
         progress = self._fetch_active_progress() if alive else None
 
         # ── 選單列標題：綠燈 + progress pct（有進度時）/ 紅燈（DOWN）
+        # 「判」prefix 讓劉海 MBP 上的 icon 更顯眼（純 emoji 容易在選單列雜訊中被忽略）
         if alive:
             if progress and "/" in progress:
                 # e.g. "580/807 筆 · 命中 371" → 72%
@@ -130,13 +132,13 @@ class ServerMonitor(rumps.App):
                     frac = progress.split(" ")[0]  # "580/807"
                     done, tot = frac.split("/")
                     pct = int(int(done) / int(tot) * 100) if int(tot) > 0 else 0
-                    self.title = f"🟢 {pct}%"
+                    self.title = f"判 🟢 {pct}%"
                 except Exception:
-                    self.title = "🟢"
+                    self.title = "判 🟢"
             else:
-                self.title = "🟢"
+                self.title = "判 🟢"
         else:
-            self.title = "🔴"
+            self.title = "判 🔴"
 
         # ── 選單第一列：狀態 ─────────────
         if alive:

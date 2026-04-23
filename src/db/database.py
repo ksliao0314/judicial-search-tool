@@ -206,6 +206,17 @@ async def init_db() -> None:
                 "遷移：analysis_results 清 dupe + 加 UNIQUE(analysis_id, case_id)"
             )
 
+        # 遷移 15（v1.0.5.x）：analyses.skipped_case_ids — 記錄 stage2.5 fetch 失敗的 case_id
+        # 背景：stage3 fetch 時、MCP 若回空（司法院 WAF throttle / 暫時性錯誤）、3-retry 都
+        #   失敗 → skip 跑完後 warning 只有總筆數、律師無法得知是哪幾筆、也無法重試。
+        # Schema：analyses.skipped_case_ids TEXT（JSON list of case_id 字串）、NULL = 無 skip。
+        # 舊 row backfill 為 NULL（pre-v1.0.5.x 沒記錄這資訊、無從補）。
+        if "skipped_case_ids" not in a_cols:
+            await db.execute(
+                "ALTER TABLE analyses ADD COLUMN skipped_case_ids TEXT"
+            )
+            logger.info("遷移：analyses 新增 skipped_case_ids 欄位")
+
         await db.commit()
     logger.info("資料庫初始化完成：%s", DB_PATH)
 

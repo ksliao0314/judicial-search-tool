@@ -18,6 +18,7 @@ from src.worker.runner import (
     register_worker, unregister_worker, WORK_TIMEOUT_SEC,
     request_finalize_preliminary, request_graceful_abort, _clear_graceful_abort,
     _fire_abort_partial_synthesis,
+    start_retry_skipped, _is_retry_skipped_inflight,
 )
 
 logger = logging.getLogger(__name__)
@@ -465,6 +466,56 @@ async def resume_analysis(
     )
     asyncio.create_task(dispatch_work(work))
     return {"analysis_id": analysis_id, "status": "running"}
+
+
+@router.post("/tasks/{task_id}/analyses/{analysis_id}/retry-skipped", status_code=202)
+async def retry_skipped_cases(
+    task_id: str,
+    analysis_id: str,
+    x_api_key: str | None = Header(default=None),
+) -> dict:
+    """律師按「重試 N 筆下載失敗」→ 背景對 stage2.5 fetch 失敗的 case_ids 重抓 + scoring。
+
+    流程（非同步、立即回 202）：
+    1. 讀 analyses.skipped_case_ids
+    2. 逐筆 _fetch_one：成功寫 task_judgments、失敗加回 still_skipped
+    3. 對救回的筆跑 run_analysis_v2(case_id_filter=...) 跑 scoring
+    4. 更新 skipped_case_ids（留下仍失敗的、全成功則 NULL）
+    5. SSE retry_skipped_{start|progress|done} 通知 UI
+
+    不重跑 synthesis — 新救回的 match 會出現在結果列表、cluster/summary 維持原樣。
+    律師若要含在 synthesis、可按「重新總結」或發新追問。
+
+    Race：_retry_skipped_inflight guard 防 double-click；既有 retry 在跑就回 409。
+    """
+    task = await db.get_task(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="Task not found")
+    analysis = await db.get_analysis(analysis_id)
+    if not analysis:
+        raise HTTPException(status_code=404, detail="Analysis not found")
+    raw = analysis.get("skipped_case_ids")
+    if not raw:
+        raise HTTPException(status_code=404, detail="此分析無下載失敗記錄可重試")
+    try:
+        skipped = json.loads(raw)
+    except (json.JSONDecodeError, TypeError):
+        skipped = []
+    if not skipped:
+        raise HTTPException(status_code=404, detail="待重試清單為空")
+
+    if _is_retry_skipped_inflight(analysis_id):
+        raise HTTPException(status_code=409, detail="此分析已在重試中")
+
+    started = start_retry_skipped(task_id, analysis_id, x_api_key)
+    if not started:
+        raise HTTPException(status_code=409, detail="重試啟動失敗（可能已在跑）")
+
+    return {
+        "analysis_id": analysis_id,
+        "status": "retrying",
+        "total": len(skipped),
+    }
 
 
 class QuickFollowupRequest(BaseModel):

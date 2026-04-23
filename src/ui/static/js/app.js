@@ -185,6 +185,13 @@ function applyRouterState(s) {
     state.card.open = true;
     state.card.taskId = target.taskId;
     state.currentTaskId = target.taskId;
+    _lastProgressAt = Date.now();   // 同 openSearchCard：重開錶，避免跨任務時間戳洩漏
+    state.card._lastFeedTime = null;
+    state.card._feedItems = [];
+    state.card._feedItemCaseIds = new Set();
+    state.card._feedItemCount = 0;
+    state.card._feedEventCount = 0;
+    state.card._analysisStartMs = null;
     document.getElementById('search-card-backdrop').classList.remove('hidden');
     document.getElementById('search-card').classList.remove('hidden');
     lockBodyScroll();
@@ -1117,6 +1124,89 @@ document.getElementById('search-help-backdrop').addEventListener('click', () => 
   document.getElementById('search-help-card').classList.add('hidden');
   unlockBodyScroll();
 });
+
+// ─── Skipped Cases Modal — stage2.5 fetch 失敗 case 的查看 / 重試 ─────
+// 開啟點：State C 結果頁 header 的「⚠ N 筆下載失敗」pill 點擊
+// 資料來源：state.card.skippedCaseIds（由 renderCardResults 從 analysis.skipped_case_ids 解出）
+function openSkippedModal() {
+  const list = state.card.skippedCaseIds || [];
+  if (!list.length) return;
+  document.getElementById('skipped-modal-count').textContent = list.length;
+  const listEl = document.getElementById('skipped-modal-list');
+  listEl.innerHTML = list.map(jid => `
+    <div class="flex items-center gap-3 py-1.5 border-b border-warm-100 last:border-0" data-jid="${escHtml(jid)}">
+      <span class="inline-block w-4 text-warm-300 shrink-0" data-role="status-icon">○</span>
+      <span class="flex-1 min-w-0 truncate text-ink">${escHtml(jid)}</span>
+      <a href="https://judgment.judicial.gov.tw/FJUD/data.aspx?ty=JD&amp;id=${encodeURIComponent(jid)}"
+         target="_blank" rel="noopener"
+         class="text-[10px] text-seal hover:underline font-mono shrink-0">司法院原文 ↗</a>
+    </div>
+  `).join('');
+  document.getElementById('skipped-modal-status').textContent = '';
+  const retryBtn = document.getElementById('skipped-modal-retry');
+  retryBtn.disabled = false;
+  retryBtn.classList.remove('hidden');
+  retryBtn.textContent = '全部重試';
+  // 重新開 modal 時把 re-synthesis CTA 隱藏（上次 retry 的殘影）
+  const resynthBtn = document.getElementById('skipped-modal-resynth');
+  if (resynthBtn) resynthBtn.classList.add('hidden');
+  document.getElementById('skipped-modal-backdrop').classList.remove('hidden');
+  document.getElementById('skipped-modal-card').classList.remove('hidden');
+  lockBodyScroll();
+}
+
+function closeSkippedModal() {
+  document.getElementById('skipped-modal-backdrop').classList.add('hidden');
+  document.getElementById('skipped-modal-card').classList.add('hidden');
+  unlockBodyScroll();
+}
+
+async function onSkippedRetryClick() {
+  const retryBtn = document.getElementById('skipped-modal-retry');
+  const statusEl = document.getElementById('skipped-modal-status');
+  if (!state.card.taskId || !state.card.analysisId) return;
+  retryBtn.disabled = true;
+  retryBtn.textContent = '啟動中…';
+  statusEl.textContent = '';
+
+  // 關鍵：重試用的 SSE 事件（retry_skipped_*）走 subscribeTask 註冊的 listener。
+  // 但 State C 單純看結果時 SSE 通常已斷（task 已 done），直接 POST 不等連線會錯過事件、
+  // 前端卡在「重試已啟動、等待 SSE 通知」。先 ensureSseSubscribed 再 POST。
+  try {
+    await ensureSseSubscribed(state.card.taskId);
+  } catch (err) {
+    // SSE 連不上不 fatal — 結束會 refresh state、仍能看到結果，只是中途 progress 顯示不了
+    console.warn('[retry-skipped] SSE subscribe 失敗，continuing without live progress:', err);
+  }
+
+  try {
+    const res = await apiFetch(
+      `/api/tasks/${state.card.taskId}/analyses/${state.card.analysisId}/retry-skipped`,
+      { method: 'POST' },
+    );
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(body || `${res.status}`);
+    }
+    const data = await res.json();
+    retryBtn.textContent = `重試中 0 / ${data.total}`;
+    statusEl.innerHTML = `<span class="text-warm-500">重試已啟動、等待 SSE 通知</span>`;
+  } catch (err) {
+    retryBtn.disabled = false;
+    retryBtn.textContent = '全部重試';
+    statusEl.innerHTML = `<span class="text-red-500">啟動失敗：${escHtml(err.message || String(err))}</span>`;
+  }
+}
+
+document.getElementById('skipped-modal-close')?.addEventListener('click', closeSkippedModal);
+document.getElementById('skipped-modal-cancel')?.addEventListener('click', closeSkippedModal);
+document.getElementById('skipped-modal-backdrop')?.addEventListener('click', closeSkippedModal);
+document.getElementById('skipped-modal-retry')?.addEventListener('click', onSkippedRetryClick);
+// 重試成功後的 CTA：關掉 modal + 呼叫既有 reSynthesis()（律師不用再去找 🔄 icon）
+document.getElementById('skipped-modal-resynth')?.addEventListener('click', () => {
+  closeSkippedModal();
+  reSynthesis();
+});
 document.getElementById('main-search').addEventListener('keydown', e => {
   // 注音/中文輸入法選字也會觸發 Enter — 用 isComposing 或 keyCode 229 擋掉
   if (e.key === 'Enter' && !e.isComposing && e.keyCode !== 229) handleSearch();
@@ -1614,6 +1704,7 @@ async function createAndRunTask(params) {
     // 先訂閱 SSE（避免 worker 在 POST 回應後、訂閱前搶先 publish 導致漏事件）
     state.card.taskId = task_id;
     state.card.searching = true;
+    state.card.comboProgress = null;   // fresh task 不該帶上一輪的變體進度
     subscribeTaskForCard(task_id);
 
     // 再開卡片，顯示搜尋中狀態
@@ -1683,6 +1774,19 @@ function subscribeTaskForCard(taskId) {
     renderTaskLists();
   }));
 
+  // 變體進度：在 header 顯示「變體 X/Y」，讓律師知道搜尋是在各個 keyword 展開上切換
+  // （8 個變體 × 3-5s each 的空窗期時，知道不是卡住、是在跑下一個組合）
+  src.addEventListener('stage1_combo_progress', sseHandler(e => {
+    const d = JSON.parse(e.data);
+    state.card.comboProgress = { idx: d.combo_idx, total: d.total_combos };
+    if (state.card.open && state.card.taskId === taskId && state.card.state === 'a' && state.card.searching) {
+      const span = document.getElementById('card-combo-progress');
+      if (span && d.total_combos > 1) {
+        span.textContent = ` · 變體 ${d.combo_idx}/${d.total_combos}`;
+      }
+    }
+  }));
+
   src.addEventListener('stage1_done', sseHandler(async e => {
     const d = JSON.parse(e.data);
     src.close();
@@ -1709,8 +1813,9 @@ function subscribeTaskForCard(taskId) {
     renderNotificationBell();
     renderTaskLists();
 
-    // 結束搜尋狀態 → 重繪卡片 header（去掉 pulse dot）
+    // 結束搜尋狀態 → 重繪卡片 header（去掉 pulse dot + 變體進度）
     state.card.searching = false;
+    state.card.comboProgress = null;
     state.card.searchWarnings = d.warnings || [];
     if (state.card.open && state.card.taskId === taskId && state.card.state === 'a') {
       state.stage2 = {
@@ -1796,10 +1901,23 @@ function subscribeTask(taskId, analysisId = null) {
     renderStage2();   // 重算 filter chip counts、年度拉桿範圍、列表
   }));
 
+  // 變體進度（general flow）— 同時更新 state + 卡片 header（如果卡片此時也打開）
+  src.addEventListener('stage1_combo_progress', sseHandler(e => {
+    const d = JSON.parse(e.data);
+    state.card.comboProgress = { idx: d.combo_idx, total: d.total_combos };
+    if (state.card.open && state.card.taskId === d.task_id && state.card.state === 'a' && state.card.searching) {
+      const span = document.getElementById('card-combo-progress');
+      if (span && d.total_combos > 1) {
+        span.textContent = ` · 變體 ${d.combo_idx}/${d.total_combos}`;
+      }
+    }
+  }));
+
   // Stage 1 完成：truncated 提示 + 更新 task 清單 hits_total + 收掉「搜尋中…」indicator
   src.addEventListener('stage1_done', sseHandler(async e => {
     const d = JSON.parse(e.data);
     setResultsLoading(null);
+    state.card.comboProgress = null;   // 下次新搜尋才不會殘留舊的「變體 8/8」
     if (d.truncated) {
       console.warn(`Stage 1 結果超過 ${d.hits_total} 筆已截斷`);
     }
@@ -2025,6 +2143,7 @@ async function openTask(taskId) {
     const taskActive = (task.status === 'running' || task.status === 'pending');
     if (!hasHits && taskActive) {
       state.card.searching = true;
+      state.card.comboProgress = null;   // 等 SSE 重新推；避免顯示其他 task 殘留值
       openSearchCard(taskId, 'a');
       subscribeTaskForCard(taskId);
       return;
@@ -2888,6 +3007,19 @@ function openSearchCard(taskId, cardState = 'a') {
   state.card.open = true;
   state.card.taskId = taskId;
   state.currentTaskId = taskId;
+  // Stall detector 重新開錶：避免跨任務殘留上一個 task 的 _lastProgressAt
+  // （例：Task A 有 batch_done 事件、關掉後開 Task B、warning 用 A 的舊時間戳算成「932 秒未回應」）
+  // 用 Date.now() 不用 0 — 新開卡片給 SSE 90s 同步窗口；若真的 90s 內無事件才警告
+  _lastProgressAt = Date.now();
+  // Live feed ticker 相關狀態也 reset — 避免跨任務殘留 Task A 的 _lastFeedTime 造成
+  // 「● API 無回應，系統自動重試（998s）」假警告（renderCardProgress 會依新 task 的
+  // aCompleted 決定是重設為 Date.now() 還是 null 等首筆）
+  state.card._lastFeedTime = null;
+  state.card._feedItems = [];
+  state.card._feedItemCaseIds = new Set();
+  state.card._feedItemCount = 0;
+  state.card._feedEventCount = 0;
+  state.card._analysisStartMs = null;
   document.getElementById('search-card-backdrop').classList.remove('hidden');
   document.getElementById('search-card').classList.remove('hidden');
   lockBodyScroll();
@@ -2913,6 +3045,16 @@ function closeSearchCard() {
   _stopFinalSafetyPoll();
   // 中止中 UI（timer + 強制結束按鈕）也清、避免 DOM 殘留影響下次開卡
   _clearAbortUI();
+  // Stall warning 歸零 + 清殘留 DOM；避免下次開別的任務時看到上次殘影
+  _lastProgressAt = 0;
+  document.getElementById('card-stuck-warn')?.remove();
+  // Live feed ticker 狀態也一併清；避免跨任務殘留造成「API 無回應 998s」假警告
+  state.card._lastFeedTime = null;
+  state.card._feedItems = [];
+  state.card._feedItemCaseIds = new Set();
+  state.card._feedItemCount = 0;
+  state.card._feedEventCount = 0;
+  state.card._analysisStartMs = null;
   // API 錯誤 banner 也清（下次開新 task 重新偵測）
   state.card._apiBannerShown = false;
   const apiBanner = document.getElementById('card-api-error-banner');
@@ -2934,6 +3076,10 @@ function setCardState(s) {
   if (s !== 'b' && state.card._agoTimer) {
     clearInterval(state.card._agoTimer);
     state.card._agoTimer = null;
+  }
+  // 離開 State B 也把 stuck warning DOM 清掉（state-b DIV 雖 hide、子節點若沒清、重入會看到殘影）
+  if (s !== 'b') {
+    document.getElementById('card-stuck-warn')?.remove();
   }
   // 更新 history entry 讓瀏覽器上一頁回到正確的 card state
   history.replaceState(
@@ -2970,9 +3116,12 @@ function setCardState(s) {
   const kw = getTaskOriginalKeyword(task);
   if (s === 'a') {
     if (state.card.searching) {
+      const cp = state.card.comboProgress;
+      // 只有展開超過 1 個變體才顯示（單一變體時 「1/1」 是 noise）
+      const comboTxt = (cp && cp.total > 1) ? ` · 變體 ${cp.idx}/${cp.total}` : '';
       hdr.innerHTML = `<span class="flex items-center gap-2">
         <span class="pulse-dot w-1.5 h-1.5 rounded-full bg-seal inline-block"></span>
-        搜尋中 · 已找到 <span id="card-search-count">${state.hits.length.toLocaleString()}</span> 筆
+        搜尋中 · 已找到 <span id="card-search-count">${state.hits.length.toLocaleString()}</span> 筆<span id="card-combo-progress" class="text-warm-400">${escHtml(comboTxt)}</span>
       </span>`;
       searchBar.classList.remove('hidden');
     } else if (state.hits.length === 0) {
@@ -3887,7 +4036,17 @@ function renderCardProgress(question) {
       timeEl2.textContent = `已執行 ${_fmtElapsed(now - start)}`;
     }
     if (agoEl2) {
-      if (!state.card._lastFeedTime) {
+      // 非 running/pending 的 task（partial / done / failed / cancelled）不該繼續跑秒數警告。
+      // ticker 本身仍要 tick 來凍結 elapsed（line 3923），但 agoEl2 應顯示狀態、不算秒數
+      // 這是第二層防禦：即使 _lastFeedTime 因任何原因殘留舊值，非 active 時也不會跳假警告
+      if (!isActive) {
+        const statusLabel = curA?.status === 'partial' ? '已中止'
+          : curA?.status === 'failed' ? '已失敗'
+          : curA?.status === 'cancelled' ? '已取消'
+          : '已完成';
+        agoEl2.innerHTML = `<span class="text-warm-400">● ${statusLabel}</span>`;
+        agoEl2.className = 'text-[10px] font-mono';
+      } else if (!state.card._lastFeedTime) {
         agoEl2.innerHTML = '<span class="text-warm-400">● 等待首筆回傳</span>';
         agoEl2.className = 'text-[10px] font-mono';
       } else {
@@ -4354,6 +4513,14 @@ async function renderCardResults(analysisId) {
   const analysis = state.analyses.find(a => a.id === analysisId);
   if (!analysis) return;
 
+  // Populate skipped case_ids — 讓 warning pill 能點開 modal 重試
+  try {
+    state.card.skippedCaseIds = analysis.skipped_case_ids
+      ? JSON.parse(analysis.skipped_case_ids) : [];
+  } catch {
+    state.card.skippedCaseIds = [];
+  }
+
   // Fetch all results (no pagination for initial load — we page client-side)
   const url = `${API.judgments(state.card.taskId)}?primary_analysis_id=${analysisId}`;
   const res = await apiFetch(url);
@@ -4422,12 +4589,26 @@ async function renderCardResults(analysisId) {
   // Header stats 要在 allResults 填好後重算（setCardState 可能早於此）
   updateCardHeaderStats('c');
 
-  // Update header
-  const skipped = state.card.fetchSkipped || 0;
-  const skippedSuffix = skipped ? `　⚠ ${skipped} 筆下載失敗未分析` : '';
-  document.getElementById('card-header-text').innerHTML =
-    '分析結果'
-    + (skippedSuffix ? `<span class="text-amber-600 text-xs font-normal ml-2">${skippedSuffix}</span>` : '');
+  // Update header — 優先用 DB 持久化的 skippedCaseIds（re-open task 也看得到）、
+  // 無值時 fallback 到 SSE 帶來的 fetchSkipped 計數（本次新跑任務的臨時值）
+  const skippedList = state.card.skippedCaseIds || [];
+  const skipped = skippedList.length || state.card.fetchSkipped || 0;
+  let headerHtml = '分析結果';
+  if (skipped > 0 && skippedList.length > 0) {
+    // 有 case_id 列表 → 可點擊 button、彈 modal 看 list + 重試
+    headerHtml +=
+      `<button id="skipped-pill" type="button"
+          class="ml-2 text-amber-600 hover:text-amber-700 text-xs font-normal
+                 underline decoration-dotted underline-offset-2 cursor-pointer transition-colors">
+        ⚠ ${skipped} 筆下載失敗　[查看／重試]
+      </button>`;
+  } else if (skipped > 0) {
+    // 只有數字（例如舊 analysis 升級前）— 降級顯示、不能點
+    headerHtml += `<span class="ml-2 text-amber-600 text-xs font-normal">⚠ ${skipped} 筆下載失敗未分析</span>`;
+  }
+  document.getElementById('card-header-text').innerHTML = headerHtml;
+  // Wire up click handler（每次 render 重綁、確保舊 DOM 被 replace 後新 button 也有 listener）
+  document.getElementById('skipped-pill')?.addEventListener('click', openSkippedModal);
 
   // Empty state
   document.getElementById('card-results-empty').classList.toggle('hidden', relevant.length > 0);
@@ -4521,6 +4702,40 @@ function renderCardSynthesis(synth, bannerInfo = null) {
     if (finalizeBtn) finalizeBtn.addEventListener('click', handleFinalizePreliminary);
   } else if (banner) {
     banner.remove();
+  }
+
+  // Stale detection：analysis.match_count > synth.total_relevant → synthesis 是在舊 match
+  // 基礎上生成的（例如：retry-skipped 救回新 match、但沒重跑 synthesis）。
+  // 只在「非 preliminary banner」的情境顯示（running / partial 另有自己的提示、不重複）。
+  let staleBanner = document.getElementById('card-synth-stale-banner');
+  if (synth && !bannerInfo) {
+    const a = (state.analyses || []).find(x => x.id === state.card.analysisId);
+    const currentMatch = a?.match_count ?? 0;
+    const synthTotal = synth.total_relevant ?? 0;
+    const staleDelta = currentMatch - synthTotal;
+    if (staleDelta > 0) {
+      if (!staleBanner) {
+        staleBanner = document.createElement('div');
+        staleBanner.id = 'card-synth-stale-banner';
+        staleBanner.className = 'mb-3 flex items-center gap-3 px-3 py-2 rounded-sm border border-amber-300 bg-amber-50 text-[12px]';
+        synthContainer.insertBefore(staleBanner, synthContainer.firstChild);
+      }
+      staleBanner.innerHTML = `
+        <span class="font-mono text-[10px] uppercase tracking-widest text-amber-700 shrink-0">尚未更新</span>
+        <span class="text-warm-600 flex-1">此總結為 <span class="font-mono text-ink">${synthTotal}</span> 筆時生成、現有 <span class="font-mono text-ink">${currentMatch}</span> 筆命中（+${staleDelta} 筆未納入分類）</span>
+        <button id="card-synth-stale-resynth-btn"
+          class="font-mono text-[11px] text-seal hover:text-ink border border-seal hover:border-ink px-2 py-1 rounded-sm transition-colors shrink-0">
+          重新生成 →
+        </button>`;
+      document.getElementById('card-synth-stale-resynth-btn')?.addEventListener('click', () => {
+        // 復用既有 #card-synth-refresh 的 click flow（含 confirm 彈窗 + 成本提示）
+        document.getElementById('card-synth-refresh')?.click();
+      });
+    } else if (staleBanner) {
+      staleBanner.remove();
+    }
+  } else if (staleBanner) {
+    staleBanner.remove();
   }
 
   if (!synth) {
@@ -7210,8 +7425,23 @@ function highlightKeywordsInReader(taskId) {
 
 // ─── Scroll to excerpt position ───────────────────────
 
+// Normalize：抹平兩邊「應該算同一段」但 Unicode 不同的字
+// 解 miss 原因：判決 HTML 含 PUA / 全形數字英文 / 各種引號；AI 生成 excerpt 時
+// 可能用不同變體（e.g. 判決「」、model 輸出 ""）。normalize 兩邊後比對
+// fuzzyFind 命中率大幅提升。
+function _normalizeForMatch(s) {
+  if (!s) return '';
+  return s
+    .replace(/\s+/g, '')                                    // 空白、NBSP、tab
+    .replace(/[\u200B-\u200F\uFEFF\u2028\u2029]/g, '')      // zero-width、BOM、分段分行
+    .replace(/[\uE000-\uF8FF]/g, '')                        // PUA（司法院 HTML 偶有）
+    .replace(/[""''「」『』《》〈〉`´˝]/g, '')                 // 各種引號（normalize 為「去除」）
+    .replace(/[，。、；：！？,.;:!?~～]/g, '')                // 標點（全／半形）
+    .normalize('NFKC');                                      // 全形→半形：數字、英文字母
+}
+
 // 滑動視窗比對：在 haystack 中找與 needle 最高匹配率的位置
-function _fuzzyFind(haystack, needle, threshold = 0.8) {
+function _fuzzyFind(haystack, needle, threshold = 0.75) {
   if (!haystack || !needle) return -1;
   const nLen = needle.length;
   if (nLen === 0 || haystack.length < nLen) return -1;
@@ -7242,11 +7472,8 @@ function _fuzzyFind(haystack, needle, threshold = 0.8) {
 function scrollToExcerptInReader(excerpt) {
   if (!excerpt) return false;
   const textEl = document.getElementById('rc-text');
-  // 取 excerpt 前 30 字去空白當搜尋錨點
-  const anchor = excerpt.replace(/\s+/g, '').slice(0, 30);
-  if (anchor.length < 4) return false;
 
-  // 收集全部 text nodes + 建立一條連續字串
+  // 收集全部 text nodes + 建立一條 normalized 連續字串
   // 重要：跳過 AI 評價區塊內的 text nodes — 那裡也含 excerpt 文字，
   // 否則 fuzzyFind 第一個命中就在區塊本身、scroll 到頂部視覺上沒動
   const walker = document.createTreeWalker(textEl, NodeFilter.SHOW_TEXT, {
@@ -7261,14 +7488,42 @@ function scrollToExcerptInReader(excerpt) {
   let fullText = '';
   while (walker.nextNode()) {
     const node = walker.currentNode;
-    const clean = (node.nodeValue || '').replace(/\s+/g, '');
-    nodes.push({ node, start: fullText.length, len: clean.length });
-    fullText += clean;
+    const norm = _normalizeForMatch(node.nodeValue || '');
+    nodes.push({ node, start: fullText.length, len: norm.length });
+    fullText += norm;
   }
 
-  // 模糊搜尋
-  const pos = _fuzzyFind(fullText, anchor);
-  if (pos === -1) return false;  // miss — 呼叫端顯示 feedback
+  // 多錨點 fallback：開頭可能共通詞、或被 AI 改寫；中段 / 尾段常保留原文
+  // 任一錨點命中就跳、三個都 miss 才回報失敗
+  const normExcerpt = _normalizeForMatch(excerpt);
+  if (normExcerpt.length < 8) return false;   // 太短、不具唯一性、不浪費時間
+  const anchors = [];
+  anchors.push(normExcerpt.slice(0, Math.min(30, normExcerpt.length)));
+  if (normExcerpt.length >= 30) {
+    const mid = Math.floor(normExcerpt.length / 2);
+    anchors.push(normExcerpt.slice(Math.max(0, mid - 10), Math.min(normExcerpt.length, mid + 10)));
+  }
+  if (normExcerpt.length >= 20) {
+    anchors.push(normExcerpt.slice(-Math.min(20, normExcerpt.length)));
+  }
+
+  let pos = -1;
+  for (const a of anchors) {
+    if (a.length < 8) continue;
+    const p = _fuzzyFind(fullText, a, 0.75);
+    if (p !== -1) { pos = p; break; }
+  }
+
+  if (pos === -1) {
+    // Diagnostic log：幫我偵錯「偶爾 miss」— 下次 user 再報、請看 console 這筆
+    console.warn('[excerpt] 找不到對應段落', {
+      excerpt_preview: excerpt.slice(0, 40),
+      excerpt_norm_len: normExcerpt.length,
+      haystack_norm_len: fullText.length,
+      anchors_tried: anchors.map(a => a.slice(0, 20)),
+    });
+    return false;   // miss — 呼叫端顯示 feedback
+  }
 
   // 找到 pos 對應的 text node
   for (const n of nodes) {
@@ -8301,6 +8556,88 @@ function subscribeBellTask(taskId) {
 
   src.addEventListener('analysis_done', sseHandler(e => {
     // Handled by stage3_synthesis_done (synthesis always follows analysis_done)
+  }));
+
+  // 重試下載失敗的 case — 3 個事件：start / progress / done
+  // Modal 開著時才更新 DOM、關著時 state 仍會被 done 事件刷新（下次開 modal 或 State C 顯示正確）
+  src.addEventListener('retry_skipped_start', sseHandler(e => {
+    const d = JSON.parse(e.data);
+    const retryBtn = document.getElementById('skipped-modal-retry');
+    if (retryBtn && !document.getElementById('skipped-modal-card').classList.contains('hidden')) {
+      retryBtn.disabled = true;
+      retryBtn.textContent = `重試中 0 / ${d.total}`;
+    }
+  }));
+
+  src.addEventListener('retry_skipped_progress', sseHandler(e => {
+    const d = JSON.parse(e.data);
+    if (document.getElementById('skipped-modal-card').classList.contains('hidden')) return;
+    const retryBtn = document.getElementById('skipped-modal-retry');
+    if (retryBtn) retryBtn.textContent = `重試中 ${d.current} / ${d.total}`;
+    // 更新對應 row 的 status icon
+    const listEl = document.getElementById('skipped-modal-list');
+    const rows = listEl.querySelectorAll('[data-jid]');
+    for (const row of rows) {
+      if (row.getAttribute('data-jid') === d.case_id) {
+        const icon = row.querySelector('[data-role="status-icon"]');
+        if (icon) {
+          if (d.status === 'fetched') {
+            icon.textContent = '✓';
+            icon.className = 'inline-block w-4 text-emerald-500 shrink-0';
+          } else if (d.status === 'failed') {
+            icon.textContent = '✕';
+            icon.className = 'inline-block w-4 text-red-400 shrink-0';
+          }
+        }
+        break;
+      }
+    }
+  }));
+
+  src.addEventListener('retry_skipped_done', sseHandler(async e => {
+    const d = JSON.parse(e.data);
+    // 重整 analyses — skipped_case_ids + match_count 都可能更新
+    const aRes = await apiFetch(`${API.task(taskId)}/analyses`);
+    if (aRes.ok) {
+      state.analyses = await aRes.json();
+      const a = state.analyses.find(x => x.id === d.analysis_id);
+      try {
+        state.card.skippedCaseIds = a?.skipped_case_ids ? JSON.parse(a.skipped_case_ids) : [];
+      } catch {
+        state.card.skippedCaseIds = [];
+      }
+    }
+    // 更新 modal 狀態文字
+    const retryBtn = document.getElementById('skipped-modal-retry');
+    const resynthBtn = document.getElementById('skipped-modal-resynth');
+    const statusEl = document.getElementById('skipped-modal-status');
+    const modalOpen = !document.getElementById('skipped-modal-card').classList.contains('hidden');
+    if (modalOpen) {
+      if (retryBtn) {
+        retryBtn.disabled = true;
+        retryBtn.classList.add('hidden');   // 隱藏「全部重試」騰出位置給「重新生成總結」CTA
+      }
+      if (statusEl) {
+        // 兩行：第一行事實、第二行引導（若有新 match）
+        const parts = [`救回 ${d.recovered} / ${d.total} 筆`];
+        if (d.new_matches > 0) parts.push(`新增 ${d.new_matches} 筆命中`);
+        if (d.still_failed > 0) parts.push(`<span class="text-amber-600">${d.still_failed} 筆仍失敗</span>`);
+        const factLine = parts.join('　·　');
+        const hintLine = d.new_matches > 0
+          ? `<span class="block text-[11px] text-warm-600 mt-1">AI 總結尚未包含新增的 ${d.new_matches} 筆、建議重新生成</span>`
+          : '';
+        statusEl.innerHTML = factLine + hintLine;
+      }
+      if (resynthBtn && d.new_matches > 0) {
+        resynthBtn.classList.remove('hidden');   // 露出 CTA、新 match 時才顯示
+        resynthBtn.disabled = false;
+      }
+    }
+    // Refresh 結果列表（若在 State C、有新 match 要顯示）
+    if (state.card.open && state.card.taskId === taskId && state.card.state === 'c'
+        && state.card.analysisId === d.analysis_id && d.recovered > 0) {
+      await renderCardResults(d.analysis_id);
+    }
   }));
 
   // 分析被取消（rows < 3，無 partial synthesis 價值 or task 刪除）— 回 State A

@@ -270,6 +270,15 @@ def _clear_graceful_abort(analysis_id: str) -> None:
     _graceful_abort_requested.discard(analysis_id)
 
 
+# Retry-skipped in-flight guard：防 double-click 同時 fire 兩個 retry worker
+# 造成同 case 被重覆 fetch / scoring 寫 DB 衝突（UNIQUE(analysis_id, case_id) 會擋、
+# 但先擋在 endpoint 層更乾淨）
+_retry_skipped_inflight: set[str] = set()
+
+def _is_retry_skipped_inflight(analysis_id: str) -> bool:
+    return analysis_id in _retry_skipped_inflight
+
+
 # 剩餘筆數門檻：達標時觸發 preliminary synthesis（total < 30 不觸發，太少沒收斂的價值）
 def _preliminary_remaining_threshold(total: int) -> int | None:
     if total < 30:
@@ -1356,7 +1365,14 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
         })
         logger.info("[%s] stage1 round %d 寫入 %d，DB 累計 %d", task_id, round_num, len(new_items), total_now)
 
-    for combo in combos:
+    # Early termination：連續 2 個 combo delta=0 → 剩下都是 subset、提早停。
+    # Variants 之間常高度重疊（例：「勞務契約」「承攬契約」都命中「契約」類判決），
+    # 8 個 combo 跑完最後 3 個可能都是 0 delta，各多花 10–20s 只為了確認 0 收穫。
+    # 阈值 2（不是 1）避免誤停：有時某 combo 臨時 0 命中（法院 cache miss）下一個又恢復。
+    zero_delta_combos = 0
+    EARLY_STOP_THRESHOLD = 2
+
+    for combo_idx, combo in enumerate(combos, start=1):
         cur_total = await db.count_task_search_hits(task_id)
         if cur_total >= STAGE1_HARD_CAP:
             logger.info("[%s] stage1 已達 hard cap %d，停止後續 combo", task_id, STAGE1_HARD_CAP)
@@ -1364,6 +1380,16 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
         await _check_task_alive(task_id)
         and_query = " ".join(combo)
         remaining = STAGE1_HARD_CAP - cur_total
+
+        # 先通知前端目前跑到第幾個變體 — State A header 會顯示「變體 X/Y」
+        await sse_bus.publish(task_id, "stage1_combo_progress", {
+            "task_id": task_id,
+            "combo_idx": combo_idx,
+            "total_combos": len(combos),
+            "query": and_query,
+        })
+
+        prev_total = cur_total
 
         if work.exhaustive:
             await search_pipeline.run_search_exhaustive(
@@ -1386,6 +1412,21 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
                 main_text=work.main_text,
             )
             await on_round(hits, 1, len(hits))
+
+        # combo 完成：檢查這一輪有沒有新增 hit
+        new_total = await db.count_task_search_hits(task_id)
+        delta = new_total - prev_total
+        if delta == 0:
+            zero_delta_combos += 1
+            remaining_combos = len(combos) - combo_idx
+            if zero_delta_combos >= EARLY_STOP_THRESHOLD and remaining_combos > 0:
+                logger.info(
+                    "[%s] stage1 連續 %d 個變體無新 hit，提前終止（省 %d 個剩餘變體）",
+                    task_id, zero_delta_combos, remaining_combos,
+                )
+                break
+        else:
+            zero_delta_combos = 0
 
     # 收尾
     final_total = await db.count_task_search_hits(task_id)
@@ -2136,6 +2177,21 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
     except (asyncio.CancelledError, Exception):
         pass
 
+    # Persist skipped_cases 到 DB — 律師可在 UI 按「全部重試」叫 retry endpoint 重抓
+    # （暫時性 MCP/司法院 WAF 失敗佔大宗、下次重試通常救得回）。存 case_id 陣列、
+    # 不存 error 訊息（retry 時反正要重跑、原錯誤訊息保留意義不大）。
+    if skipped_cases:
+        try:
+            await db.update_analysis(
+                analysis_id,
+                skipped_case_ids=json.dumps(
+                    [c["case_id"] for c in skipped_cases], ensure_ascii=False,
+                ),
+            )
+        except Exception as exc:
+            # 寫入失敗只 log、不影響主流程（UI 仍可看到 skipped 數、只是無法 retry）
+            logger.warning("[%s] 寫入 skipped_case_ids 失敗：%s", task_id, exc)
+
     # ── Phase 3.5：retry missing judgments ──
     # Scoring 主迴圈結束後，task_judgments 可能有些 case 完全沒被評分（server 重啟中斷 /
     # queue 漏抓）。用 list_missing_judgments 找出來，用 run_analysis_v2 加 case_id_filter
@@ -2317,6 +2373,202 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
     logger.info("[%s] stage3 v2 完成 analysis=%s，相關 %d/%d 筆，consensus=%s",
                 task_id, analysis_id, match_count, after_filter, synthesis.get("consensus"))
 
+
+# ---------------------------------------------------------------------------
+# Retry-skipped：對 stage2.5 fetch 失敗的 case_id 重試
+# ---------------------------------------------------------------------------
+# 背景：Stage3 fetch 時 MCP 可能回空（司法院 WAF throttle、MCP subprocess 臨時卡、
+# 或 cookie 失效），3-retry 耗盡後當筆就 skip、警告「N 筆下載失敗未分析」。實測
+# 大多數失敗是暫時性的（手動再抓成功率高）。這 endpoint 讓律師一鍵重試。
+#
+# 流程：
+#   1. 讀 analyses.skipped_case_ids（stage3 結束時寫入）
+#   2. 逐筆 _fetch_one：成功 → create_task_judgment；失敗 → 加回 still_skipped
+#   3. 全部抓完後、對成功筆用 run_analysis_v2(case_id_filter=...) 跑 scoring
+#   4. 更新 analyses.skipped_case_ids（留 still_skipped；全成功則 NULL）
+#   5. SSE 通知 UI refresh 結果列表
+# 不重跑 synthesis — synthesis 的 summary / clusters 可能會略遺漏新救回的 match、
+# 但律師按「重新總結」或發新追問可再生。簡化複雜度、省成本。
+
+async def _run_retry_skipped(
+    task_id: str,
+    analysis_id: str,
+    api_key: str | None = None,
+) -> None:
+    """背景執行：retry stage2.5 fetch 失敗的 case_ids。
+
+    呼叫 pattern：API endpoint 檢查 inflight guard 後 asyncio.create_task() 這個函式。
+    完成/失敗都負責清 inflight guard。
+    """
+    from src.pipeline.filter import _fetch_one
+    from src.pipeline.citation_extractor import extract_citations
+    from src.pipeline import analyze as analyze_pipeline
+    from src.mcp_client import PARSER_VERSION
+
+    try:
+        analysis = await db.get_analysis(analysis_id)
+        task = await db.get_task(task_id)
+        if not analysis or not task:
+            logger.warning("[%s] retry-skipped abort: analysis or task missing", task_id)
+            return
+
+        raw = analysis.get("skipped_case_ids") or "[]"
+        try:
+            skipped = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            skipped = []
+        if not skipped:
+            logger.info("[%s] retry-skipped no-op: skipped_case_ids empty", task_id)
+            return
+
+        logger.info("[%s] retry-skipped 開始：%d 筆", task_id, len(skipped))
+        await sse_bus.publish(task_id, "retry_skipped_start", {
+            "task_id": task_id, "analysis_id": analysis_id, "total": len(skipped),
+        })
+
+        # Phase 1：逐筆 fetch（平行但受 MCP bucket 限流）
+        still_skipped: list[str] = []
+        recovered_case_ids: list[str] = []   # MCP 回傳的人類可讀 case_id（寫 task_judgments 用）
+        FETCH_CONCURRENCY = 3  # retry 用較保守的並行數、避免再次觸發司法院 WAF
+        fetch_sem = asyncio.Semaphore(FETCH_CONCURRENCY)
+
+        async def _retry_fetch_one(jid: str, idx: int) -> None:
+            async with fetch_sem:
+                try:
+                    judgment = await _fetch_one(jid)
+                except Exception as exc:
+                    logger.warning("[%s] retry-skipped fetch 仍失敗 %s：%s",
+                                   task_id, jid, str(exc)[:100])
+                    still_skipped.append(jid)
+                    await sse_bus.publish(task_id, "retry_skipped_progress", {
+                        "task_id": task_id, "analysis_id": analysis_id,
+                        "current": idx, "total": len(skipped),
+                        "case_id": jid, "status": "failed",
+                    })
+                    return
+
+                # 寫入 task_judgments — 跟 stage3 的 fetch 路徑保持一致
+                ft = judgment.get("full_text") or ""
+                extracted = extract_citations(ft) if ft else []
+                ec_serialized = [list(c.as_tuple()) for c in extracted] if extracted else None
+                cited = judgment.get("cited_statutes")
+                if isinstance(cited, str):
+                    try: cited = json.loads(cited)
+                    except json.JSONDecodeError: cited = [cited] if cited else []
+
+                real_case_id = judgment.get("case_id", jid)
+                try:
+                    await db.create_task_judgment(
+                        task_id=task_id, case_id=real_case_id,
+                        court=judgment.get("court", ""), date=judgment.get("date", ""),
+                        source_url=judgment.get("source_url", ""),
+                        reasoning=judgment.get("reasoning"), main_text=judgment.get("main_text"),
+                        facts=judgment.get("facts"), cited_statutes=cited,
+                        full_text=judgment.get("full_text"), extracted_citations=ec_serialized,
+                        judges=judgment.get("judges"), parties=judgment.get("parties"),
+                        cause=judgment.get("cause"),
+                        parser_version=PARSER_VERSION,
+                    )
+                except Exception as exc:
+                    # 可能已存在（極少數 race）、忽略；continue 跑 scoring
+                    logger.info("[%s] retry-skipped task_judgments 寫入跳過 %s：%s",
+                                task_id, real_case_id, str(exc)[:80])
+
+                recovered_case_ids.append(real_case_id)
+                await sse_bus.publish(task_id, "retry_skipped_progress", {
+                    "task_id": task_id, "analysis_id": analysis_id,
+                    "current": idx, "total": len(skipped),
+                    "case_id": jid, "status": "fetched",
+                })
+
+        await asyncio.gather(*[_retry_fetch_one(jid, i) for i, jid in enumerate(skipped, start=1)])
+
+        # Phase 2：對救回的 case 跑 scoring（若有救回）
+        new_matches = 0
+        if recovered_case_ids:
+            logger.info("[%s] retry-skipped 進入 scoring：%d 筆救回、%d 筆仍失敗",
+                        task_id, len(recovered_case_ids), len(still_skipped))
+            ai_read = (analysis.get("ai_read_field") or "").split(",")
+            read_facts = "facts" in ai_read
+            search_domain = task.get("search_domain") or "judgment"
+
+            # 從 task.search_params 取 expanded_variants（smart_truncate 用）
+            sp_raw = task.get("search_params") or "{}"
+            try:
+                sp = json.loads(sp_raw) if isinstance(sp_raw, str) else sp_raw
+                truncation_keywords = sp.get("expanded_variants") if isinstance(sp, dict) else None
+            except (json.JSONDecodeError, TypeError):
+                truncation_keywords = None
+
+            discovery_keyword = (task.get("keyword") or "").split()[0] if task.get("keyword") else None
+
+            # 記 scoring 前的 match_count → 跑 → 比 diff（省得一筆筆查 DB、且自動跟
+            # run_analysis_v2 的 increment_analysis_progress 計算口徑一致）
+            a_before = await db.get_analysis(analysis_id)
+            match_count_before = (a_before or {}).get("match_count", 0) or 0
+
+            # 對新救回的 case 跑 scoring（run_analysis_v2 的 case_id_filter 機制）
+            # match_count 由 increment_analysis_progress 更新、completed 同步更新
+            try:
+                await analyze_pipeline.run_analysis_v2(
+                    analysis_id=analysis_id, task_id=task_id,
+                    question=analysis["question"], read_facts=read_facts,
+                    api_key=api_key,
+                    case_id_filter=recovered_case_ids,
+                    discovery_keyword=discovery_keyword,
+                    search_keywords=truncation_keywords,
+                    search_domain=search_domain,
+                )
+            except Exception as exc:
+                logger.warning("[%s] retry-skipped scoring 錯誤：%s", task_id, exc)
+
+            a_after = await db.get_analysis(analysis_id)
+            match_count_after = (a_after or {}).get("match_count", 0) or 0
+            new_matches = max(0, match_count_after - match_count_before)
+
+        # Phase 3：更新 skipped_case_ids — 留下仍失敗的、全成功則清 NULL
+        # 同時恢復 status — run_analysis_v2 進 scoring 時會把 status 改 running、
+        # retry 結束需改回原本的終態（done / partial）；依 synthesis_is_preliminary 判斷
+        a_final = await db.get_analysis(analysis_id) or {}
+        restore_status = (
+            "partial" if a_final.get("synthesis_is_preliminary")
+            else "done"
+        )
+        await db.update_analysis(
+            analysis_id,
+            status=restore_status,
+            skipped_case_ids=(
+                json.dumps(still_skipped, ensure_ascii=False) if still_skipped else None
+            ),
+        )
+
+        await sse_bus.publish(task_id, "retry_skipped_done", {
+            "task_id": task_id, "analysis_id": analysis_id,
+            "total": len(skipped),
+            "recovered": len(recovered_case_ids),
+            "still_failed": len(still_skipped),
+            "new_matches": new_matches,
+        })
+        logger.info("[%s] retry-skipped 完成：%d 救回（%d 新 match）、%d 仍失敗",
+                    task_id, len(recovered_case_ids), new_matches, len(still_skipped))
+    except Exception as exc:
+        logger.exception("[%s] retry-skipped 未捕獲異常：%s", task_id, exc)
+        await sse_bus.publish(task_id, "retry_skipped_done", {
+            "task_id": task_id, "analysis_id": analysis_id,
+            "total": 0, "recovered": 0, "still_failed": 0, "new_matches": 0,
+            "error": str(exc)[:200],
+        })
+    finally:
+        _retry_skipped_inflight.discard(analysis_id)
+
+
+def start_retry_skipped(task_id: str, analysis_id: str, api_key: str | None = None) -> bool:
+    """API 入口：檢查 inflight guard、true = 啟動成功、false = 已在跑"""
+    if analysis_id in _retry_skipped_inflight:
+        return False
+    _retry_skipped_inflight.add(analysis_id)
+    asyncio.create_task(_run_retry_skipped(task_id, analysis_id, api_key))
+    return True
 
 
 # ---------------------------------------------------------------------------

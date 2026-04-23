@@ -664,6 +664,16 @@
     button:focus-visible, a:focus-visible, input:focus-visible, textarea:focus-visible, select:focus-visible {
       outline: 2px solid #111110; outline-offset: 2px;
     }
+    /* Reader 內 button 的 focus — 用暖銅 40% 替代全域墨黑 */
+    /* 背景：全域 focus-visible 為墨黑 2px solid、對 reader toolbar 那些 16×16 SVG
+       icon button 顯得過重（outline 緊貼 SVG 邊界、變成視覺噪音）。rc-* button
+       本就是柔和的 text-warm-400 / hover-state、focus ring 改暖銅 40% 更協調。
+       input/textarea/select 繼承全域墨黑規則不受影響。 */
+    #reader-card button:focus-visible {
+      outline: 2px solid rgba(109, 90, 65, 0.4);
+      outline-offset: 1px;
+      border-radius: 2px;
+    }
     button { cursor: pointer; }
 
     /* Reader (State C) */

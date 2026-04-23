@@ -133,6 +133,7 @@ var state = {
     analysisId: null,
     state: null,          // 'a' | 'b' | 'c'
     searching: false,     // Stage 1 搜尋進行中
+    comboProgress: null,  // {idx, total} — stage 1 keyword 變體進度（8 個變體時顯示「變體 3/8」）
     progress: 0,          // 0-100
     progressPhase: '',    // 'fetch' | 'read' | 'synth'
     fetchTotal: 0,        // 全文抓取總數（進度條算 %）
@@ -144,6 +145,7 @@ var state = {
     sortBy: 'score',      // 'score' | 'date'
     readCaseIds: new Set(),        // 已讀的 case_ids（per session，點過 reader 就加入）
     searchWarnings: [],           // Stage 1 截斷警告
+    skippedCaseIds: [],           // stage2.5 fetch 失敗、可手動重試的 case_id JID 列表
     reasoningFilter: false,       // 理由預篩 toggle
     prefilterCaseIds: null,       // 預篩命中的 case_ids
     prefilterRunning: false,      // 預篩進行中
