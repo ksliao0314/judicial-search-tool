@@ -59,10 +59,20 @@ class TokenBucket:
 
 
 def estimate_prompt_tokens(text: str) -> int:
-    """粗略估算繁體中文混英文 prompt 的 input token 數。
+    """估算繁體中文混英文 prompt 的 input token 數。
 
-    Anthropic tokenizer 對中文通常 1 token ≈ 1 CJK 字，英文 1 token ≈ 4 chars。
-    我們 prompt 以中文為主，保守估算：1 char → 1.0 token（含 ASCII 偏差緩衝）。
-    這個上估比低估好 — 讓 bucket 更保守。
+    舊版用 `len(text)`（1 char ≈ 1 token），對中文嚴重高估：Anthropic tokenizer 對
+    繁中常 1 token ≈ 1.5-2 字、ASCII 1 token ≈ 4 chars。1.0/char 會讓 bucket 被多扣
+    ~2 倍、把本可並行的呼叫白白序列化（吞吐受限）。
+
+    改為分字類保守估算：
+      - 非 ASCII（CJK 為主）: 0.6 token/char  — 比真實 (~0.5) 高一點留安全邊際
+      - ASCII（英數標點）:     0.3 token/char  — 4 char/token + 緩衝
+    仍刻意「寧可上估」（避免低估觸發 429、429 retry 要等 30s 滾動視窗），但把過度高估
+    從 ~2 倍收斂到 ~1.2 倍，釋放吞吐。最終 retry/429 路徑仍是安全網。
     """
-    return len(text)
+    if not text:
+        return 0
+    ascii_n = sum(1 for ch in text if ord(ch) < 128)
+    cjk_n = len(text) - ascii_n
+    return int(cjk_n * 0.6 + ascii_n * 0.3) + 8  # +8: 訊息框架 overhead 緩衝

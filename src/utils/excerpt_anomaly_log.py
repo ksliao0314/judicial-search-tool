@@ -15,6 +15,10 @@ V2 prompt 要求 Claude 從「法院判斷段落」挑 excerpt、不要挑主文
     charge_imposition_leak — excerpt 含刑事判決「論罪/論罪科刑/罪數/量刑」典型語句
                              （「核被告X所為，均係犯刑法第Y條」「應依...論處」等）
                              這是構成要件成立後的 downstream 決定、不是構成要件認定本身
+    excerpt_not_in_source  — LLM excerpt 在快取判決原文中定位不到（捏造 / 抓錯文件 /
+                             快取殘缺）。A1 診斷副產品：寬鬆比對（NFKC + 去標點 + 省略號
+                             分段 + 連續片段），coverage < 0.4 才報，誤報極低（1924 筆實測
+                             僅 1 筆 = 110訴更一23，case_id 是判決但快取到 112 年裁定）。
 
 JSONL 格式：每行一個 dict
     {
@@ -32,6 +36,7 @@ import asyncio
 import json
 import logging
 import re
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -79,8 +84,56 @@ _CHARGE_IMPOSITION_PATTERNS = [
     re.compile(r'量處.{0,10}?(?:有期徒刑|拘役|罰金)'),
 ]
 
+# ── excerpt_not_in_source（A1 canary）─────────────────────────────────────
+# 寬鬆比對，刻意偏向「定位得到」以壓低誤報：normalize（NFKC + 台→臺 + 去空白/標點）後，
+# 把 excerpt 依省略號分段，逐段檢查是否為快取原文子字串；coverage < 0.4 才報。
+_ZW_CHARS = "​‌‍﻿⁠"
+_ELLIPSIS_RE = re.compile(r'(?:\.{2,}|。{2,}|[…⋯]+)')
+_LABEL_PREFIX_RE = re.compile(r'^\s*\[[^\]]+\]\s*')
+_MATCH_STRIP_RE = re.compile(
+    r'[\s　，。：；！？、（）()「」『』〔〕\[\]【】,.:;!?~～\-—…⋯"\'`*_／/]')
+_FRAG_COVERAGE_THRESHOLD = 0.4   # < 0.4 視為定位不到（A1 實測：真案例 coverage=0.0）
+_FRAG_MIN_LEN = 6                 # 太短的片段不足以當證據，跳過
 
-def detect_anomaly_kinds(*, excerpt: str, score: int | None, main_text: str | None) -> list[str]:
+
+def _norm_for_match(s: str) -> str:
+    if not s:
+        return ''
+    s = unicodedata.normalize('NFKC', s)
+    s = ''.join(ch for ch in s if ch not in _ZW_CHARS)
+    s = s.replace('　', '').replace('台', '臺')
+    return _MATCH_STRIP_RE.sub('', s)
+
+
+def _excerpt_locates(excerpt: str, source_text: str) -> tuple[bool, float]:
+    """excerpt 是否定位得到於 source_text。回 (located, coverage)。
+
+    保守設計：source 為空、或 excerpt 無實質片段時回 (True, 1.0)（不報異常）。
+    """
+    src = _norm_for_match(source_text)
+    if not src:
+        return (True, 1.0)
+    body = _LABEL_PREFIX_RE.sub('', excerpt or '').strip()
+    total = matched = 0.0
+    for frag in _ELLIPSIS_RE.split(body):
+        nf = _norm_for_match(frag)
+        if len(nf) < _FRAG_MIN_LEN:
+            continue
+        total += len(nf)
+        if nf in src:
+            matched += len(nf)
+        elif len(nf) >= 8 and any(nf[i:i + 8] in src for i in range(len(nf) - 7)):
+            matched += len(nf) * 0.5   # 真片段嵌進自己措辭 → 半分，不算純捏造
+    if total == 0:
+        return (True, 1.0)
+    cov = matched / total
+    return (cov >= _FRAG_COVERAGE_THRESHOLD, cov)
+
+
+def detect_anomaly_kinds(
+    *, excerpt: str, score: int | None, main_text: str | None,
+    source_text: str | None = None,
+) -> list[str]:
     """回傳此 excerpt 觸發的 anomaly kind list（空 list = 無異常）。同步 function、純 string check。"""
     kinds: list[str] = []
     excerpt_clean = (excerpt or '').strip()
@@ -105,6 +158,13 @@ def detect_anomaly_kinds(*, excerpt: str, score: int | None, main_text: str | No
     if excerpt_clean and any(p.search(excerpt_clean) for p in _CHARGE_IMPOSITION_PATTERNS):
         kinds.append('charge_imposition_leak')
 
+    # excerpt_not_in_source: LLM excerpt 在快取判決原文中定位不到（A1 canary）
+    # 只在有提供 source_text + excerpt 非空時檢查；保守（coverage < 0.4 才報）
+    if excerpt_clean and source_text:
+        located, _cov = _excerpt_locates(excerpt_clean, source_text)
+        if not located:
+            kinds.append('excerpt_not_in_source')
+
     return kinds
 
 
@@ -115,10 +175,17 @@ async def log_excerpt_anomaly(
     score: int | None,
     excerpt: str,
     main_text: str | None = None,
+    source_text: str | None = None,
 ) -> None:
-    """偵測 + 寫 JSONL。失敗吞掉（不影響 scoring pipeline）。"""
+    """偵測 + 寫 JSONL。失敗吞掉（不影響 scoring pipeline）。
+
+    source_text：快取的判決原文（reasoning / full_text 等），供 excerpt_not_in_source
+    定位檢查用；不傳則跳過該項檢查（向後相容）。
+    """
     try:
-        kinds = detect_anomaly_kinds(excerpt=excerpt, score=score, main_text=main_text)
+        kinds = detect_anomaly_kinds(
+            excerpt=excerpt, score=score, main_text=main_text, source_text=source_text,
+        )
         if not kinds:
             return
         record = {

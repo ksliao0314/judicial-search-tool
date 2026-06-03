@@ -636,6 +636,32 @@ def _extract_retry_after(exc: Exception) -> float | None:
 # v2 Claude 呼叫：用新 prompt (score = 論述詳細度)，回 {score, position, excerpt}
 # ---------------------------------------------------------------------------
 
+# scoring prompt 內「判決內文」段的起始 marker（位於 _V2_SUFFIX）。指示段 / 內文段以此切分。
+_SCORING_FIELD_MARKER = "判決內容如下（各段以【】標示段落類型）：\n"
+
+
+def _split_scoring_prompt(prompt: str) -> tuple[list[dict], str]:
+    """把已 format 的 scoring prompt 切成 (system_blocks, user_content)。
+
+    指示段（評分規則 + question + keyword、per-analysis 固定）放進 cached system block；
+    判決內文段（per-judgment 變動）留 user message。同一 analysis 的多筆判決共用指示段前綴
+    → 可命中 prompt cache。找不到 marker（理論上不會）→ fallback 回單一 user message
+    （不快取、行為與舊版相同）。"""
+    idx = prompt.rfind(_SCORING_FIELD_MARKER)
+    if idx < 0:
+        return ([{"type": "text", "text": SYSTEM_PROMPT,
+                  "cache_control": {"type": "ephemeral"}}], prompt)
+    instructions = prompt[:idx].rstrip()
+    field_block = prompt[idx:]
+    return (
+        [
+            {"type": "text", "text": SYSTEM_PROMPT},
+            {"type": "text", "text": instructions, "cache_control": {"type": "ephemeral"}},
+        ],
+        field_block,
+    )
+
+
 async def _call_claude_v2(
     case_id: str,
     field_text: str,
@@ -659,6 +685,11 @@ async def _call_claude_v2(
         keyword=keyword or question,
         field_text=field_text,  # 截取已由 _get_field_text 的 _smart_truncate 處理
     )
+    # Prompt caching：per-analysis 固定的指示段（含 question/keyword）切進 cached system
+    # block、per-judgment 變動的判決內文留 user message。同一 analysis 的 N 筆判決共用指示
+    # 段前綴 → 命中 cache。⚠ Haiku 4.5 cache 門檻 2048 tokens、指示段約 1.4-1.7K、偏低、
+    # 未必每次觸發；是否真快取看 response.usage.cache_read（已存進 result._usage_cache_read）。
+    system_blocks, user_content = _split_scoring_prompt(prompt)
     estimated_tokens = estimate_prompt_tokens(SYSTEM_PROMPT) + estimate_prompt_tokens(prompt)
 
     last_exc: Exception | None = None
@@ -669,9 +700,8 @@ async def _call_claude_v2(
             response = await client.messages.create(
                 model=MODEL_SCORING,
                 max_tokens=_SCORING_MAX_TOKENS,
-                system=[{"type": "text", "text": SYSTEM_PROMPT,
-                         "cache_control": {"type": "ephemeral"}}],
-                messages=[{"role": "user", "content": prompt}],
+                system=system_blocks,
+                messages=[{"role": "user", "content": user_content}],
             )
             raw_text = response.content[0].text
             stop_reason = getattr(response, "stop_reason", None)
@@ -686,6 +716,16 @@ async def _call_claude_v2(
             if usage:
                 result["_usage_input"] = getattr(usage, "input_tokens", 0)
                 result["_usage_output"] = getattr(usage, "output_tokens", 0)
+                # prompt-cache 觀測：cache_read > 0 表示指示段確實命中快取（驗證 #1 是否生效）。
+                # Haiku 4.5 cache 最低門檻 2048 token、指示段僅 ~1.4-1.7K → 恆為 0（已知 no-op）；
+                # 換 Sonnet（門檻 1024）或指示段變長後才生效，屆時下面 debug log 會開始出現。
+                result["_usage_cache_read"] = getattr(usage, "cache_read_input_tokens", 0) or 0
+                result["_usage_cache_write"] = getattr(usage, "cache_creation_input_tokens", 0) or 0
+                if result["_usage_cache_read"] or result["_usage_cache_write"]:
+                    logger.debug(
+                        "prompt-cache 生效：read=%d write=%d tokens（#1 指示段拆分命中快取）",
+                        result["_usage_cache_read"], result["_usage_cache_write"],
+                    )
             return result
         except Exception as exc:
             last_exc = exc
@@ -1601,9 +1641,16 @@ async def run_analysis_v2(
             # Log excerpt quality anomalies（非阻塞、不 re-pick、一週後 review 決定要不要加後處理）
             try:
                 from src.utils.excerpt_anomaly_log import log_excerpt_anomaly
+                # source_text：聯集所有快取欄位，供 excerpt_not_in_source 定位檢查
+                # （A1 canary — 抓 excerpt 在原文定位不到的捏造 / 抓錯文件 / 快取殘缺）
+                _src = " ".join(
+                    t for t in (judgment.get("reasoning"), judgment.get("main_text"),
+                                judgment.get("facts"), judgment.get("full_text")) if t
+                )
                 await log_excerpt_anomaly(
                     case_id=case_id, analysis_id=analysis_id, score=score,
                     excerpt=raw_excerpt, main_text=judgment.get("main_text"),
+                    source_text=_src,
                 )
             except Exception:
                 pass
@@ -1732,23 +1779,29 @@ async def run_analysis_v2(
     # Streaming 模式下 completed 初值需對齊 two_pass（already_done × 2）
     if use_two_pass:
         new_total = total * 2
-        if streaming_mode:
-            # 修正 already_done 的 completed offset（caller 一開始可能設為 already_done_count，
-            # 但 two_pass 每筆 = 2 step，需 × 2 才能與 workers 的 increment 對齊）
-            await db.update_analysis(analysis_id, total=new_total)
-        else:
-            # DB-read 模式 caller 已把 completed 設為 already_done_count，需 × 2 對齊
-            await db.update_analysis(
-                analysis_id, total=new_total,
-                completed=already_done_count * 2,
-            )
+        # 兩種模式都硬性把 completed 對齊到 already_done_count × 2（two_pass 每筆 = 2 step）。
+        # DB-read：caller 在上方已設 completed=already_done_count，需 ×2 校正。
+        # streaming：DB completed 是上一輪累積值，理應已 = 2×already_done，但中途 crash 的
+        # 半筆（screening +1、fullread 沒跑）或跨輪 pass-mode 改變會讓它漂掉 → 進度條到不了/
+        # 超過 100%。在 consumer workers 啟動前硬 reset 吸收 resume 漂移（fresh 時 =0 無副作用）。
+        await db.update_analysis(
+            analysis_id, total=new_total,
+            completed=already_done_count * 2,
+        )
         logger.info(
             "analysis_v2 %s 自動流轉模式 %d 筆（streaming=%s, screening %dK + auto-promote, total=%d steps）",
             analysis_id, workload_count, streaming_mode, SCREENING_BUDGET // 1000, new_total,
         )
     else:
-        logger.info("analysis_v2 %s 單輪模式 %d 筆（streaming=%s）",
-                    analysis_id, workload_count, streaming_mode)
+        # 單階段：total = N（每筆 1 step）。原本 else 漏寫 total → analysis.total 停在 None
+        # → on_batch_done 的 a_now.get("total") 回 None → batch_done 送 total=null →
+        # 前端進度顯示「X / null」、且進度條卡在 33%。補寫 total（streaming 也要）。
+        # completed 對齊 already_done_count（含 streaming，理由同 two_pass 分支：硬 reset 吸收 resume 漂移）。
+        await db.update_analysis(
+            analysis_id, total=workload_count, completed=already_done_count,
+        )
+        logger.info("analysis_v2 %s 單輪模式 %d 筆（streaming=%s, total=%d）",
+                    analysis_id, workload_count, streaming_mode, workload_count)
 
     if streaming_mode:
         # Producer-consumer：CONCURRENCY 個 worker 持續從 queue 取判決，遇 None 結束。

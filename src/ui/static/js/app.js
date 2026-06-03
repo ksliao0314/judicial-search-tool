@@ -128,16 +128,10 @@ function saveStage2FilterToStorage(taskId) {
 }
 
 // ─── Starred cases bootstrap ──────────────────────
-// App 啟動時從 DB 載入律師過往星標。失敗不阻塞其他功能（降級為空 set）。
+// 星標已改為 per-analysis：啟動時無「當前分析層」，不在此載入。實際載入在 renderCardResults
+// （切到某分析層時撈該層星標填 state.starred）。這裡只初始化空 set。
 async function initStarredCases() {
-  try {
-    const res = await apiFetch(API.starredCases);
-    if (!res.ok) throw new Error(`starredCases ${res.status}`);
-    const ids = await res.json();
-    state.starred = new Set(Array.isArray(ids) ? ids : []);
-  } catch (err) {
-    console.warn('[star] 載入星標失敗，維持空 set:', err);
-  }
+  state.starred = new Set();
 }
 
 // ─── View transitions ─────────────────────────────
@@ -1715,6 +1709,12 @@ async function createAndRunTask(params) {
 }
 
 // Stage 1 專用 SSE：只追蹤 stage1_progress + stage1_done，完成後開卡片
+// 進度標籤「X / Y」分母：total 未知（streaming 模式總筆數尚未寫入 DB）或 ≤0 時不印「/ null」，
+// 改顯示「X 筆」。done/total 已是還原後的判決筆數（非內部 step 數）。
+function _judgFrac(done, total) {
+  return (typeof total === 'number' && total > 0) ? `${done} / ${total} 筆` : `${done} 筆`;
+}
+
 function subscribeTaskForCard(taskId) {
   if (state.sse) state.sse.close();
   const src = new EventSource(API.stream(taskId));
@@ -1901,6 +1901,83 @@ function subscribeTask(taskId, analysisId = null) {
     renderStage2();   // 重算 filter chip counts、年度拉桿範圍、列表
   }));
 
+  // 重試下載失敗 case 的進度事件（retry_skipped_*）。必須註冊在 subscribeTask —— 重試 modal
+  // 的 onSkippedRetryClick 走 ensureSseSubscribed→subscribeTask（state.sse），事件才接得到。
+  // （另一份在 subscribeBellTask；兩條連線都開時 double-fire，但所有更新皆冪等、無害。
+  //  根治之道是收斂 3 個重複 subscriber，屬獨立重構。）
+  src.addEventListener('retry_skipped_start', sseHandler(e => {
+    const d = JSON.parse(e.data);
+    const retryBtn = document.getElementById('skipped-modal-retry');
+    if (retryBtn && !document.getElementById('skipped-modal-card').classList.contains('hidden')) {
+      retryBtn.disabled = true;
+      retryBtn.textContent = `重試中 0 / ${d.total}`;
+    }
+  }));
+  src.addEventListener('retry_skipped_progress', sseHandler(e => {
+    const d = JSON.parse(e.data);
+    if (document.getElementById('skipped-modal-card').classList.contains('hidden')) return;
+    const retryBtn = document.getElementById('skipped-modal-retry');
+    if (retryBtn) retryBtn.textContent = `重試中 ${d.current} / ${d.total}`;
+    const listEl = document.getElementById('skipped-modal-list');
+    const rows = listEl ? listEl.querySelectorAll('[data-jid]') : [];
+    for (const row of rows) {
+      if (row.getAttribute('data-jid') === d.case_id) {
+        const icon = row.querySelector('[data-role="status-icon"]');
+        if (icon) {
+          if (d.status === 'fetched') {
+            icon.textContent = '✓';
+            icon.className = 'inline-block w-4 text-emerald-500 shrink-0';
+          } else if (d.status === 'failed') {
+            icon.textContent = '✕';
+            icon.className = 'inline-block w-4 text-red-400 shrink-0';
+          }
+        }
+        break;
+      }
+    }
+  }));
+  src.addEventListener('retry_skipped_done', sseHandler(async e => {
+    const d = JSON.parse(e.data);
+    const aRes = await apiFetch(`${API.task(taskId)}/analyses`);
+    if (aRes.ok) {
+      state.analyses = await aRes.json();
+      const a = state.analyses.find(x => x.id === d.analysis_id);
+      try {
+        state.card.skippedCaseIds = a?.skipped_case_ids ? JSON.parse(a.skipped_case_ids) : [];
+      } catch {
+        state.card.skippedCaseIds = [];
+      }
+    }
+    const retryBtn = document.getElementById('skipped-modal-retry');
+    const resynthBtn = document.getElementById('skipped-modal-resynth');
+    const statusEl = document.getElementById('skipped-modal-status');
+    const modalOpen = !document.getElementById('skipped-modal-card').classList.contains('hidden');
+    if (modalOpen) {
+      if (retryBtn) {
+        retryBtn.disabled = true;
+        retryBtn.classList.add('hidden');
+      }
+      if (statusEl) {
+        const parts = [`救回 ${d.recovered} / ${d.total} 筆`];
+        if (d.new_matches > 0) parts.push(`新增 ${d.new_matches} 筆命中`);
+        if (d.still_failed > 0) parts.push(`<span class="text-amber-600">${d.still_failed} 筆仍失敗</span>`);
+        const factLine = parts.join('　·　');
+        const hintLine = d.new_matches > 0
+          ? `<span class="block text-[11px] text-warm-600 mt-1">AI 總結尚未包含新增的 ${d.new_matches} 筆、建議重新生成</span>`
+          : '';
+        statusEl.innerHTML = factLine + hintLine;
+      }
+      if (resynthBtn && d.new_matches > 0) {
+        resynthBtn.classList.remove('hidden');
+        resynthBtn.disabled = false;
+      }
+    }
+    if (state.card.open && state.card.taskId === taskId && state.card.state === 'c'
+        && state.card.analysisId === d.analysis_id && d.recovered > 0) {
+      await renderCardResults(d.analysis_id);
+    }
+  }));
+
   // 變體進度（general flow）— 同時更新 state + 卡片 header（如果卡片此時也打開）
   src.addEventListener('stage1_combo_progress', sseHandler(e => {
     const d = JSON.parse(e.data);
@@ -1958,7 +2035,7 @@ function subscribeTask(taskId, analysisId = null) {
     const doneJudg = twoPass ? Math.floor(d.completed / 2) : d.completed;
     const totalJudg = twoPass ? Math.floor(d.total / 2) : d.total;
     const matchPart = (typeof d.match_count === 'number') ? `（命中 ${d.match_count}）` : '';
-    setResultsLoading(`AI 分析中 ${doneJudg} / ${totalJudg} 筆${matchPart}…`);
+    setResultsLoading(`AI 分析中 ${_judgFrac(doneJudg, totalJudg)}${matchPart}…`);
   }));
 
   src.addEventListener('analysis_done', sseHandler(e => {
@@ -3938,7 +4015,7 @@ function renderCardProgress(question) {
   else if (aTotal > 0 && aCompleted > 0) {
     // 從 State C 切回 State B、bellInfo 尚未更新、用 DB 真值算 label
     const matchPart = `（命中 ${aMatch}）`;
-    label = `AI 分析中 ${doneJudgInit} / ${totalJudgInit}${matchPart}`;
+    label = `AI 分析中 ${_judgFrac(doneJudgInit, totalJudgInit)}${matchPart}`;
   } else if (progress > 33) label = 'AI 分析中';
   else if (progress > 0) label = '全文快取中';
   document.getElementById('card-progress-fill').style.width = Math.max(2, progress) + '%';
@@ -4096,7 +4173,12 @@ async function backfillLiveFeed(taskId, analysisId) {
   try {
     const res = await apiFetch(`/api/tasks/${taskId}/analyses/${analysisId}/results-feed`);
     if (!res.ok) return;
-    const items = await res.json();
+    const data = await res.json();
+    // 後端回 {items, total}：items 是顯示用最新 N 筆（limit 60）、total 是真實總筆數。
+    // 用 total 設 count，否則 >60 筆的分析重開卡片時 count 被 limit 砍 → 即時回傳筆數倒退。
+    // Array.isArray 向後相容（萬一拿到舊版的 list 形）。
+    const items = Array.isArray(data) ? data : (data.items || []);
+    const feedTotal = (data && typeof data.total === 'number') ? data.total : items.length;
     // 期間狀態可能已飄走（使用者關卡片 / 切到別 analysis）→ 不動 DOM
     if (!state.card.open || state.card.analysisId !== analysisId || state.card.state !== 'b') return;
 
@@ -4116,7 +4198,7 @@ async function backfillLiveFeed(taskId, analysisId) {
         feed.appendChild(row);
       }
     }
-    state.card._feedItemCount = items.length;
+    state.card._feedItemCount = feedTotal;   // 真實總數、不被顯示 limit(60) 砍 → 不倒退
     const countEl = document.getElementById('card-live-count');
     if (countEl) countEl.textContent = state.card._feedItemCount;
     if (feed && items.length > 0) feed.scrollTop = feed.scrollHeight;
@@ -4507,6 +4589,14 @@ async function renderCardResults(analysisId) {
   state.card.resultsOffset = 0;
   state.card.activeCluster = null;
   state.card.sortBy = 'score';
+
+  // 載入此分析層的使用者標記（per-analysis）。state.starred 即「當前分析層的星標」，
+  // 之後所有 state.starred.has() 顯示點（使用者標記 cluster / 列表 ★ / reader / 批次下載）
+  // 都自動反映該層。切到別的分析層會重撈、彼此獨立。
+  try {
+    const sres = await apiFetch(API.analysisStarred(analysisId));
+    state.starred = new Set(sres.ok ? await sres.json() : []);
+  } catch { state.starred = new Set(); }
 
   // Reload analyses to get latest synthesis
   await reloadAnalyses();
@@ -7838,6 +7928,8 @@ document.getElementById('rc-download-pdf').addEventListener('click', async () =>
 // Star toggle — optimistic update + DB persist
 document.getElementById('rc-star').addEventListener('click', async () => {
   if (!_readerJudgment) return;
+  const analysisId = state.card.analysisId;
+  if (!analysisId) { _showReaderToast('星標需在某個分析層內才能標記'); return; }
   const caseId = _readerJudgment.case_id;
   const starBtn = document.getElementById('rc-star');
   const wasStarred = state.starred.has(caseId);
@@ -7855,7 +7947,7 @@ document.getElementById('rc-star').addEventListener('click', async () => {
   }
   // Persist
   try {
-    const res = await apiFetch(API.caseStar(caseId), {
+    const res = await apiFetch(API.caseStar(analysisId, caseId), {
       method: wasStarred ? 'DELETE' : 'POST',
     });
     if (!res.ok) throw new Error(`star API ${res.status}`);
@@ -8420,7 +8512,7 @@ function subscribeBellTask(taskId) {
       const doneJudg = twoPass ? Math.floor(d.completed / 2) : d.completed;
       const totalJudg = twoPass ? Math.floor(d.total / 2) : d.total;
       const matchPart = (typeof d.match_count === 'number') ? `（命中 ${d.match_count}）` : '';
-      updateCardProgress(pct, `AI 分析中 ${doneJudg} / ${totalJudg}${matchPart}`);
+      updateCardProgress(pct, `AI 分析中 ${_judgFrac(doneJudg, totalJudg)}${matchPart}`);
       appendLiveFeed(d.results || []);
       if (d.usage) updateCardTokenTicker(d.usage);  // 即時 token / 成本 ticker
       // 中止按鈕判準用 match_count（命中 ≥ 3 才值得跑 partial synthesis）

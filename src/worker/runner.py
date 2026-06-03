@@ -1105,78 +1105,112 @@ async def _run_stage25_fetch(work: Stage25FetchWork) -> None:
     skipped = 0
     reused = 0     # 跨 task cache 命中計數（本次 task 直接複用既存 task_judgments row）
     cancelled = False
+    task_cancelled_exc: TaskCancelledError | None = None   # 任務整個被刪 → gather 後 re-raise
 
-    for idx, case_id in enumerate(work.case_ids):
-        # 每筆前先檢查：task 還在 + 沒被律師按停止
-        if _is_deep_fetch_cancelled(task_id):
-            cancelled = True
-            break
-        try:
-            await _check_task_alive(task_id)
-        except TaskCancelledError:
-            raise   # 讓 worker loop 的 except 處理（任務整個被刪）
+    # 並行抓取（原為序列逐筆）。global _mcp_fetch_bucket(60/min) 仍序列化真正的 MCP
+    # 呼叫，並行主要讓 cache-hit 與司法院回應延遲重疊 → cold-fetch 從「逐筆 latency-bound」
+    # 拉到「bucket 上限 bound」（典型 ~3-4x）。並發 create_task_judgment 寫入由 _conn 的
+    # busy_timeout 護住。
+    FETCH25_CONCURRENCY = 5
+    fetch_sem = asyncio.Semaphore(FETCH25_CONCURRENCY)
 
-        # === 跨 task cache lookup ===
-        cached_judgment = await _try_reuse_cached_judgment(task_id, case_id)
-        if cached_judgment is not None:
-            reused += 1
-            fetched += 1
-            if fetched % PROGRESS_EVERY == 0 or idx == total - 1:
-                await sse_bus.publish(task_id, "stage25_progress", {
-                    "task_id": task_id,
-                    "fetched": fetched,
-                    "total": total,
-                    "reused": reused,
-                })
-            continue
-
-        try:
-            judgment = await _fetch_one(case_id)
-        except Exception as exc:
-            logger.warning("[%s] stage25 跳過 %s：%s", task_id, case_id, exc)
-            skipped += 1
-            fetched += 1
-        else:
-            ft = judgment.get("full_text") or ""
-            extracted = extract_citations(ft) if ft else []
-            ec_serialized = [list(c.as_tuple()) for c in extracted] if extracted else None
-
-            cited = judgment.get("cited_statutes")
-            if isinstance(cited, str):
-                try:
-                    cited = json.loads(cited)
-                except json.JSONDecodeError:
-                    cited = [cited] if cited else []
-
-            await db.create_task_judgment(
-                task_id=task_id,
-                case_id=judgment.get("case_id", case_id),
-                court=judgment.get("court", ""),
-                date=judgment.get("date", ""),
-                source_url=judgment.get("source_url", ""),
-                reasoning=judgment.get("reasoning"),
-                main_text=judgment.get("main_text"),
-                facts=judgment.get("facts"),
-                cited_statutes=cited,
-                full_text=judgment.get("full_text"),
-                extracted_citations=ec_serialized,
-                judges=judgment.get("judges"),
-                parties=judgment.get("parties"),
-                cause=judgment.get("cause"),
-                parser_version=PARSER_VERSION,
-            )
-            # 記錄 parse 結構異常（不阻塞 fetch；無 anomaly 不寫）
-            await anomaly_log.log_judgment(judgment, task_id=task_id, jid=case_id)
-            fetched += 1
-
-        # 定期推進度（含最後一筆）
-        if fetched % PROGRESS_EVERY == 0 or idx == total - 1:
+    async def _emit_progress() -> None:
+        # 完成順序非確定但 fetched 單調遞增；最後一筆（fetched==total）必觸發
+        if fetched % PROGRESS_EVERY == 0 or fetched == total:
             await sse_bus.publish(task_id, "stage25_progress", {
-                "task_id": task_id,
-                "fetched": fetched,
-                "total": total,
-                "reused": reused,
+                "task_id": task_id, "fetched": fetched, "total": total, "reused": reused,
             })
+
+    async def _fetch_one_case(case_id: str) -> None:
+        nonlocal fetched, skipped, reused, cancelled, task_cancelled_exc
+        if cancelled or _is_deep_fetch_cancelled(task_id):
+            cancelled = True
+            return
+        async with fetch_sem:
+            if cancelled or _is_deep_fetch_cancelled(task_id):
+                cancelled = True
+                return
+            try:
+                await _check_task_alive(task_id)
+            except TaskCancelledError as exc:
+                task_cancelled_exc = exc    # 任務整個被刪 → gather 後 re-raise 交 worker loop
+                cancelled = True
+                return
+
+            # === 跨 task cache lookup ===
+            # cache 複用內含 create_task_judgment 寫入；並發下若撞 SQLITE_BUSY/UNIQUE/
+            # 磁碟錯，gather(return_exceptions=True) 會靜默吞掉 → 該筆判決無聲漏（序列版
+            # 會大聲 crash）。比照 cold-fetch 寫入失敗：記 skipped、續跑成可重試的 skip。
+            try:
+                cached_judgment = await _try_reuse_cached_judgment(task_id, case_id)
+            except Exception as exc:
+                logger.warning("[%s] stage25 cache 複用 %s 失敗：%s", task_id, case_id, exc)
+                skipped += 1
+                fetched += 1
+                await _emit_progress()
+                return
+            if cached_judgment is not None:
+                reused += 1
+                fetched += 1
+                await _emit_progress()
+                return
+
+            try:
+                judgment = await _fetch_one(case_id)
+            except Exception as exc:
+                logger.warning("[%s] stage25 跳過 %s：%s", task_id, case_id, exc)
+                skipped += 1
+                fetched += 1
+                await _emit_progress()
+                return
+
+            try:
+                ft = judgment.get("full_text") or ""
+                extracted = extract_citations(ft) if ft else []
+                ec_serialized = [list(c.as_tuple()) for c in extracted] if extracted else None
+
+                cited = judgment.get("cited_statutes")
+                if isinstance(cited, str):
+                    try:
+                        cited = json.loads(cited)
+                    except json.JSONDecodeError:
+                        cited = [cited] if cited else []
+
+                await db.create_task_judgment(
+                    task_id=task_id,
+                    case_id=judgment.get("case_id", case_id),
+                    court=judgment.get("court", ""),
+                    date=judgment.get("date", ""),
+                    source_url=judgment.get("source_url", ""),
+                    reasoning=judgment.get("reasoning"),
+                    main_text=judgment.get("main_text"),
+                    facts=judgment.get("facts"),
+                    cited_statutes=cited,
+                    full_text=judgment.get("full_text"),
+                    extracted_citations=ec_serialized,
+                    judges=judgment.get("judges"),
+                    parties=judgment.get("parties"),
+                    cause=judgment.get("cause"),
+                    parser_version=PARSER_VERSION,
+                )
+                # 記錄 parse 結構異常（不阻塞 fetch；無 anomaly 不寫）
+                await anomaly_log.log_judgment(judgment, task_id=task_id, jid=case_id)
+            except Exception as exc:
+                logger.warning("[%s] stage25 寫入 %s 失敗：%s", task_id, case_id, exc)
+                skipped += 1
+                fetched += 1
+                await _emit_progress()
+                return
+
+            fetched += 1
+            await _emit_progress()
+
+    await asyncio.gather(
+        *[_fetch_one_case(cid) for cid in work.case_ids],
+        return_exceptions=True,
+    )
+    if task_cancelled_exc is not None:
+        raise task_cancelled_exc   # 任務被刪：交給 worker loop 的 except 處理
 
     _clear_deep_fetch_cancel(task_id)
     # 清除 inflight 紀錄（無論 cancel / done）：標示「這個 task 的 fetch 不需要再
@@ -1667,7 +1701,14 @@ async def _run_reasoning_prefilter(work: ReasoningPreFilterWork) -> None:
 
         if not judgment:
             # === 跨 task cache lookup（其他 task 相同 case_id + parser_version） ===
-            cached_judgment = await _try_reuse_cached_judgment(task_id, case_id)
+            # cache 複用含 create_task_judgment 寫入；序列迴圈中若拋例外會中止整個
+            # prefilter 後續判決。比照 cold-fetch 失敗：記 skip、continue 下一筆。
+            try:
+                cached_judgment = await _try_reuse_cached_judgment(task_id, case_id)
+            except Exception as exc:
+                logger.warning("[%s] prefilter cache 複用跳過 %s：%s", task_id, case_id, exc)
+                fetched += 1
+                continue
             if cached_judgment is not None:
                 _prefilter_existing[cached_judgment["case_id"]] = cached_judgment
                 judgment = cached_judgment
@@ -1851,7 +1892,16 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
             _fetched += 1
         else:
             # === 跨 task cache lookup（在 sem 外，hits 走全平行、不佔 5-way 槽位） ===
-            cached_judgment = await _try_reuse_cached_judgment(task_id, case_id)
+            # cache 複用含 create_task_judgment 寫入；並發下若拋例外，外層 gather
+            # (return_exceptions=True) 會靜默吞掉 → 該筆無聲漏。比照 cold-fetch 失敗：
+            # 記 skipped_cases、續跑成可重試的 skip。
+            try:
+                cached_judgment = await _try_reuse_cached_judgment(task_id, case_id)
+            except Exception as exc:
+                logger.warning("[%s] stage3 cache 複用跳過 %s：%s", task_id, case_id, exc)
+                skipped_cases.append({"case_id": case_id, "error": str(exc)[:100]})
+                _fetched += 1
+                return
             if cached_judgment is not None:
                 judgment = cached_judgment
                 existing_map[cached_judgment["case_id"]] = cached_judgment

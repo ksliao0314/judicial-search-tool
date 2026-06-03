@@ -345,11 +345,11 @@ async def abort_analysis(
 
 
 @router.get("/tasks/{task_id}/analyses/{analysis_id}/results-feed")
-async def list_analysis_results_feed(task_id: str, analysis_id: str) -> list[dict]:
+async def list_analysis_results_feed(task_id: str, analysis_id: str) -> dict:
     """給 card live feed 用：律師中途打開卡片時 backfill 已精讀結果。
 
-    按 analyzed_at 升序回最新 N 筆（case_id / score / match），避免 SSE subscribe 前的
-    batch_done 事件在 UI 上被遺漏 — 原本的「即時回傳」數字與進度條脫鉤。
+    回 {items: 最新 N 筆顯示列（case_id/score/match）, total: 真實總筆數}。total 讓前端的
+    「即時回傳筆數」不會被顯示用的 limit 砍而倒退。
     """
     if not await db.get_task(task_id):
         raise HTTPException(status_code=404, detail="Task not found")

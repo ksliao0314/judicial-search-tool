@@ -152,6 +152,13 @@ COURT_CODES = {
     "臺北高等行政法院": "TPB",
     "臺中高等行政法院": "TCB",
     "高雄高等行政法院": "KSB",
+    # 高等行政法院地方行政訴訟庭（114 年行政訴訟改制後第一審獨立庭，JID 前綴 *TA）。
+    # 名稱用「X高等行政法院 地方庭」(單空格) — 與 src/pipeline/search.py expand_court_tiers
+    # 的 exact-match tier 清單、前端 inferTier 的 court.includes('地方庭') 完全一致，避免
+    # 衝突。不另設 COURT_LEVEL → _enrich_from_jid .get(code,3)=3（第一審、地方級）。
+    "臺北高等行政法院 地方庭": "TPTA",
+    "臺中高等行政法院 地方庭": "TCTA",
+    "高雄高等行政法院 地方庭": "KSTA",
     # 地方法院
     "臺灣臺北地方法院": "TPD",
     "臺灣士林地方法院": "SLD",

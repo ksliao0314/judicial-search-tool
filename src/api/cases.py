@@ -20,24 +20,24 @@ class HighlightCreate(BaseModel):
     after: str = Field("", max_length=100)
 
 
-@router.get("/cases/starred")
-async def list_starred() -> list[str]:
-    """回傳所有已星標的 case_id（newest first）。前端啟動時呼叫一次填 state。"""
-    return await db.list_starred_cases()
+@router.get("/analyses/{analysis_id}/starred")
+async def list_starred(analysis_id: str) -> list[str]:
+    """回傳某分析層已星標的 case_id（newest first）。前端切到該分析層時載入填 state。"""
+    return await db.list_starred_cases(analysis_id)
 
 
-@router.post("/cases/{case_id}/star", status_code=204)
-async def star(case_id: str) -> None:
-    """加入星標。冪等：已存在時只刷新 starred_at。"""
+@router.post("/analyses/{analysis_id}/cases/{case_id}/star", status_code=204)
+async def star(analysis_id: str, case_id: str) -> None:
+    """在某分析層加入星標。冪等：已存在時只刷新 starred_at。"""
     if not case_id.strip():
         raise HTTPException(status_code=400, detail="case_id 不可為空")
-    await db.star_case(case_id)
+    await db.star_case(analysis_id, case_id)
 
 
-@router.delete("/cases/{case_id}/star", status_code=204)
-async def unstar(case_id: str) -> None:
-    """取消星標。不存在時 no-op（冪等）。"""
-    await db.unstar_case(case_id)
+@router.delete("/analyses/{analysis_id}/cases/{case_id}/star", status_code=204)
+async def unstar(analysis_id: str, case_id: str) -> None:
+    """取消某分析層的星標。不存在時 no-op（冪等）。"""
+    await db.unstar_case(analysis_id, case_id)
 
 
 @router.get("/cases/{case_id}/highlights")

@@ -29,8 +29,8 @@ var API = {
   analyses:        (tid)    => `/api/tasks/${tid}/analyses`,
   stream:          (tid)    => `/api/tasks/${tid}/stream`,
   judgments:       (tid)    => `/api/tasks/${tid}/judgments`,
-  starredCases:    '/api/cases/starred',
-  caseStar:        (cid)    => `/api/cases/${encodeURIComponent(cid)}/star`,
+  analysisStarred: (aid)    => `/api/analyses/${aid}/starred`,
+  caseStar:        (aid, cid) => `/api/analyses/${aid}/cases/${encodeURIComponent(cid)}/star`,
   caseAnalyses:    (cid)    => `/api/cases/${encodeURIComponent(cid)}/analyses`,
   prefilterResult: (tid)    => `/api/tasks/${tid}/prefilter-result`,
   prefilterStart:  (tid)    => `/api/tasks/${tid}/reasoning-prefilter`,
@@ -94,9 +94,9 @@ var state = {
   mode: 'keyword',           // 'keyword' | 'semantic'
   view: 'home',              // 'home' | 'strategy' | 'results' | 'history'
 
-  // 使用者星標的 case_ids（跨 task 全域、DB 持久化）。
-  // 啟動時由 initStarredCases() 從 /api/cases/starred 載入；toggle 時 sync 到 API。
-  // 位置在 state 頂層而非 state.card 下 — 語意從「本 task 內標記」升級到「律師資產」。
+  // 使用者星標的 case_ids，per-analysis（綁當前分析層）。每個分析爭點不同、標記理由不同。
+  // 由 renderCardResults() 切到某分析層時從 /api/analyses/{id}/starred 載入；toggle 時 sync。
+  // 內容隨 state.card.analysisId 變動（= 當前分析層的星標）。
   starred: new Set(),
 
   tasks: [],

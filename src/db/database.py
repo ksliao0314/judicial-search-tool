@@ -23,6 +23,9 @@ async def _conn() -> AsyncIterator[aiosqlite.Connection]:
         db.row_factory = aiosqlite.Row
         await db.execute("PRAGMA journal_mode=WAL")
         await db.execute("PRAGMA foreign_keys=ON")
+        # 並發寫入（如 Stage 2.5 並行 fetch 的 create_task_judgment）取鎖時最多等 5s，
+        # 而非立刻拋 SQLITE_BUSY。WAL 下單一 writer，這給瞬間排隊空間。
+        await db.execute("PRAGMA busy_timeout=5000")
         yield db
 
 
@@ -216,6 +219,22 @@ async def init_db() -> None:
                 "ALTER TABLE analyses ADD COLUMN skipped_case_ids TEXT"
             )
             logger.info("遷移：analyses 新增 skipped_case_ids 欄位")
+
+        # 遷移 16：case_stars 從全域 (case_id PK) 改為 per-analysis (analysis_id, case_id PK)。
+        # 每個分析的法律爭點不同、律師標記理由也不同 → 星標綁 analysis_id。
+        # 使用者選「清空重來」：偵測到舊 schema（無 analysis_id 欄）→ DROP + 重建（不保留舊全域星標）。
+        cursor = await db.execute("PRAGMA table_info(case_stars)")
+        cs_cols = {row["name"] for row in await cursor.fetchall()}
+        if cs_cols and "analysis_id" not in cs_cols:
+            await db.execute("DROP TABLE case_stars")
+            await db.execute(
+                "CREATE TABLE case_stars ("
+                " analysis_id TEXT NOT NULL,"
+                " case_id     TEXT NOT NULL,"
+                " starred_at  TEXT NOT NULL,"
+                " PRIMARY KEY (analysis_id, case_id))"
+            )
+            logger.info("遷移：case_stars 改為 per-analysis（analysis_id, case_id）；清空舊全域星標")
 
         await db.commit()
     logger.info("資料庫初始化完成：%s", DB_PATH)
@@ -680,28 +699,33 @@ async def delete_prefilter_result(task_id: str) -> None:
 # case_stars
 # ---------------------------------------------------------------------------
 
-async def star_case(case_id: str) -> None:
-    """加入星標。INSERT OR REPLACE — 重複 star 只刷 starred_at。"""
+async def star_case(analysis_id: str, case_id: str) -> None:
+    """在某分析層加星標。INSERT OR REPLACE — 重複 star 只刷 starred_at。"""
     async with _conn() as db:
         await db.execute(
-            "INSERT OR REPLACE INTO case_stars (case_id, starred_at) VALUES (?, ?)",
-            (case_id, _now()),
+            "INSERT OR REPLACE INTO case_stars (analysis_id, case_id, starred_at) "
+            "VALUES (?, ?, ?)",
+            (analysis_id, case_id, _now()),
         )
         await db.commit()
 
 
-async def unstar_case(case_id: str) -> None:
-    """取消星標。不存在時 DELETE 為 no-op。"""
+async def unstar_case(analysis_id: str, case_id: str) -> None:
+    """取消某分析層的星標。不存在時 DELETE 為 no-op。"""
     async with _conn() as db:
-        await db.execute("DELETE FROM case_stars WHERE case_id = ?", (case_id,))
+        await db.execute(
+            "DELETE FROM case_stars WHERE analysis_id = ? AND case_id = ?",
+            (analysis_id, case_id),
+        )
         await db.commit()
 
 
-async def list_starred_cases() -> list[str]:
-    """回傳所有已星標 case_id（newest first）。"""
+async def list_starred_cases(analysis_id: str) -> list[str]:
+    """回傳某分析層已星標 case_id（newest first）。"""
     async with _conn() as db:
         cursor = await db.execute(
-            "SELECT case_id FROM case_stars ORDER BY starred_at DESC"
+            "SELECT case_id FROM case_stars WHERE analysis_id = ? ORDER BY starred_at DESC",
+            (analysis_id,),
         )
         rows = await cursor.fetchall()
         return [r["case_id"] for r in rows]
@@ -789,10 +813,11 @@ async def list_case_analyses(case_id: str) -> list[dict]:
 
 
 async def delete_task(task_id: str) -> dict:
-    """刪除任務及所有附屬資料（analysis_results → analyses → task_judgments → task_search_hits → tasks）。
+    """刪除任務及所有附屬資料（case_stars → analysis_results → analyses → task_judgments → task_search_hits → tasks）。
 
     回傳刪除統計，供 API 層回報。schema 沒有 CASCADE 宣告，手動依序刪。
-    **保留 case_stars**：星標是跨 task 的律師資產，不跟 task 一起消失。
+    case_stars 自 migration 16 起為 per-analysis（綁 analysis_id），隨任務底下的 analyses
+    一併清除，否則會留下 analysis_id 已不存在的孤兒星標 row（永遠 join 不到、無 UI 可清）。
     """
     async with _conn() as db:
         # 先刪 analysis_results（透過任務底下的 analyses 反查）
@@ -804,6 +829,16 @@ async def delete_task(task_id: str) -> dict:
             (task_id,),
         )
         deleted_results = cur.rowcount
+
+        # case_stars 自 migration 16 改為 per-analysis；刪 task 連帶刪其 analyses，故星標
+        # 也要清（必須在 DELETE analyses 之前，subquery 要 analyses 還在）。
+        await db.execute(
+            """
+            DELETE FROM case_stars
+             WHERE analysis_id IN (SELECT id FROM analyses WHERE task_id = ?)
+            """,
+            (task_id,),
+        )
 
         cur = await db.execute("DELETE FROM analyses WHERE task_id = ?", (task_id,))
         deleted_analyses = cur.rowcount
@@ -1240,11 +1275,12 @@ async def count_analysis_results(analysis_id: str) -> int:
         return int(row[0]) if row else 0
 
 
-async def list_analysis_results_feed(analysis_id: str, limit: int = 60) -> list[dict]:
-    """給 card live feed 用：按 analyzed_at 升序回傳最新 N 筆（僅 case_id/score/match）。
+async def list_analysis_results_feed(analysis_id: str, limit: int = 60) -> dict:
+    """給 card live feed 用：回最新 N 筆顯示列 + 真實總筆數。
 
-    升序是為了 feed 插入後 scroll-to-bottom 時最新在底下；limit 避免 SSE 中途重連時
-    一次 populate 上千筆 DOM。
+    升序是為了 feed 插入後 scroll-to-bottom 時最新在底下。limit 只限「顯示列數」（避免
+    SSE 中途重連時一次 populate 上千筆 DOM）；total 回真實總筆數 —— 否則重開卡片時
+    backfill 會把 count 設成 limit、讓 >60 筆的分析「即時回傳筆數」從實際值倒退成 60。
     """
     async with _conn() as db:
         cursor = await db.execute(
@@ -1258,7 +1294,12 @@ async def list_analysis_results_feed(analysis_id: str, limit: int = 60) -> list[
             (analysis_id, limit),
         )
         rows = [dict(r) for r in await cursor.fetchall()]
-        return list(reversed(rows))
+        cur2 = await db.execute(
+            "SELECT COUNT(*) FROM analysis_results WHERE analysis_id = ?",
+            (analysis_id,),
+        )
+        total = (await cur2.fetchone())[0]
+        return {"items": list(reversed(rows)), "total": total}
 
 
 async def get_analysis_results_scored(analysis_id: str) -> list[dict]:

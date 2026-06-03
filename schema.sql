@@ -148,12 +148,14 @@ CREATE TABLE IF NOT EXISTS task_prefilter_results (
     finished_at       TEXT              -- null 表仍在跑（包含 recovery pending）
 );
 
--- 使用者星標的判決（跨 task 共用）。
--- 單機單一律師場景：case_id 當 PK，不加 user_id。
--- 刪除 task 不連動刪 star — 星標是律師的持久資產，跟 task 生命週期解耦。
+-- 使用者星標的判決，綁「分析層」(analysis_id)。
+-- 每個分析的法律爭點不同、律師標記同一判決的理由也不同 → 星標 per-analysis 獨立，
+-- 不跨分析共用。複合主鍵 (analysis_id, case_id)。
 CREATE TABLE IF NOT EXISTS case_stars (
-    case_id    TEXT PRIMARY KEY,
-    starred_at TEXT NOT NULL
+    analysis_id TEXT NOT NULL,
+    case_id     TEXT NOT NULL,
+    starred_at  TEXT NOT NULL,
+    PRIMARY KEY (analysis_id, case_id)
 );
 
 -- 律師在 reader 中對判決文字做的黃底劃記（cross-device 同步用、脫離 localStorage）。
