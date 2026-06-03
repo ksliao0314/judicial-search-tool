@@ -4,13 +4,16 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 import aiosqlite
 
 logger = logging.getLogger(__name__)
 
 DB_PATH = "judgment_search.db"
-SCHEMA_PATH = "schema.sql"
+# __file__-relative：src/db/database.py → parents[2] = 專案根（schema.sql 在根）。
+# 讓 init_db 不依賴啟動 cwd（README 雖從根啟動，這樣更穩健）。
+SCHEMA_PATH = Path(__file__).resolve().parents[2] / "schema.sql"
 
 
 # ---------------------------------------------------------------------------
