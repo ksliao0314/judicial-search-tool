@@ -18,6 +18,14 @@ _COOKIE_FILE = Path(__file__).parent.parent / "data" / ".judicial_cookies.json"
 _WARMUP_URL = "https://judgment.judicial.gov.tw/FJUD/Default_AD.aspx"
 
 
+class WAFPermanentBlockError(RuntimeError):
+    """WAF 在刷新 cookies 後仍持續擋請求，屬於無法自動復原的硬擋。
+
+    上游 search / doc handler 需要攔這個並回傳明確訊息，否則解析 block 頁
+    會產生空結果或垃圾資料，讓使用者誤以為「沒結果」。
+    """
+
+
 class JudicialWAFBypass:
     """管理 judgment.judicial.gov.tw 的 F5 WAF cookies。
 
@@ -76,16 +84,20 @@ class JudicialWAFBypass:
     async def refresh(self) -> None:
         """執行 Playwright warmup，重取 TSPD cookies。"""
         async with self._lock:
-            # 若另一個 task 剛剛做完，避免重複 warmup
+            # 若另一個 task 剛剛做完（不論成功或 cookies 空），都先讓它沈澱 5 秒；
+            # 不檢查 self._cookies，否則 warmup 回空時 N 個並發會各拉一次 Chromium。
             now = time.time()
-            if now - self._last_warmup_at < 5.0 and self._cookies:
+            if now - self._last_warmup_at < 5.0:
                 logger.debug("WAF bypass: skipping duplicate warmup (fresh < 5s)")
                 return
             await self._run_warmup()
 
     async def _run_warmup(self) -> None:
         try:
-            from playwright.async_api import async_playwright
+            from playwright.async_api import (
+                TimeoutError as PlaywrightTimeoutError,
+                async_playwright,
+            )
         except ImportError:
             raise RuntimeError(
                 "Playwright 為繞過司法院 F5 WAF 所必需。"
@@ -94,41 +106,46 @@ class JudicialWAFBypass:
 
         logger.info("WAF bypass: running Playwright warmup...")
         t0 = time.time()
-        async with async_playwright() as p:
-            browser = await p.chromium.launch(
-                headless=True,
-                args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
-            )
-            try:
-                ctx = await browser.new_context(
-                    locale="zh-TW",
-                    timezone_id="Asia/Taipei",
-                    user_agent=(
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 (KHTML, like Gecko) "
-                        "Chrome/120.0.0.0 Safari/537.36"
-                    ),
+        try:
+            async with async_playwright() as p:
+                browser = await p.chromium.launch(
+                    headless=True,
+                    args=["--no-sandbox", "--disable-gpu", "--disable-dev-shm-usage"],
                 )
-                page = await ctx.new_page()
-                await page.goto(
-                    _WARMUP_URL, wait_until="domcontentloaded", timeout=60000
-                )
-                # 等真表單出現（代表 F5 挑戰已過）
                 try:
-                    await page.wait_for_selector("#btnQry", state="visible", timeout=15000)
-                except Exception:
-                    logger.warning("WAF bypass: #btnQry 未顯示，cookies 可能仍無效")
-                cookies = await ctx.cookies()
-                self._cookies = {c["name"]: c["value"] for c in cookies}
-                self._last_warmup_at = time.time()
-                self._save_to_disk()
-                elapsed = time.time() - t0
-                logger.info(
-                    "WAF bypass: warmup OK in %.1fs, got %d cookies",
-                    elapsed, len(self._cookies),
-                )
-            finally:
-                await browser.close()
+                    ctx = await browser.new_context(
+                        locale="zh-TW",
+                        timezone_id="Asia/Taipei",
+                        user_agent=(
+                            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                            "AppleWebKit/537.36 (KHTML, like Gecko) "
+                            "Chrome/120.0.0.0 Safari/537.36"
+                        ),
+                    )
+                    page = await ctx.new_page()
+                    await page.goto(
+                        _WARMUP_URL, wait_until="domcontentloaded", timeout=60000
+                    )
+                    # 等真表單出現（代表 F5 挑戰已過）
+                    try:
+                        await page.wait_for_selector("#btnQry", state="visible", timeout=15000)
+                    except Exception:
+                        logger.warning("WAF bypass: #btnQry 未顯示，cookies 可能仍無效")
+                    cookies = await ctx.cookies()
+                    self._cookies = {c["name"]: c["value"] for c in cookies}
+                    self._last_warmup_at = time.time()
+                    self._save_to_disk()
+                    elapsed = time.time() - t0
+                    logger.info(
+                        "WAF bypass: warmup OK in %.1fs, got %d cookies",
+                        elapsed, len(self._cookies),
+                    )
+                finally:
+                    await browser.close()
+        except PlaywrightTimeoutError as e:
+            # 將 Playwright 專屬例外收斂成 stdlib asyncio.TimeoutError，
+            # 讓上游 search handler 不必依賴 Playwright 型別。
+            raise asyncio.TimeoutError("WAF warmup 逾時") from e
 
     @staticmethod
     def is_blocked(response_text: str) -> bool:
@@ -162,6 +179,10 @@ async def get_with_waf_retry(
     2. network-level：stale cookies 讓 F5 WAF 在 TCP 層 reset connection → httpx 丟
        ReadError / ConnectError / RemoteProtocolError。這是 2026-04-19 發現的 bug：
        cookies 過 25 小時後就 network-level reject、但原本只 catch body-level 判斷 → 永遠 fail。
+
+    Raises:
+        WAFPermanentBlockError: refresh cookies 後 body-level 仍被擋。上游 doc/search
+            handler 需攔截並回明確錯誤，否則 parser 吃到 block HTML 會產生假「查無結果」。
     """
     import httpx as _httpx
     func = client.get if method == "GET" else client.post
@@ -172,11 +193,18 @@ async def get_with_waf_retry(
                     type(exc).__name__, exc)
         await waf.refresh()
         client.cookies.update(waf.get_cookies())
-        r = await func(url, **kwargs)  # 讓第二次的 exception 自然 propagate
-        return r
+        # 不在此 early-return：落到下方 body-level 檢查，讓 network-level 復原後
+        # 若拿到的仍是 block HTML 也能被偵測。第二次仍丟 exception 就讓它 propagate。
+        r = await func(url, **kwargs)
     if waf.is_blocked(r.text):
         logger.info("WAF bypass: detected body-level block, refreshing cookies")
         await waf.refresh()
         client.cookies.update(waf.get_cookies())
         r = await func(url, **kwargs)
+        if waf.is_blocked(r.text):
+            # 刷新後仍被擋：若不 raise，上游 parser 會吃到 block HTML
+            # 然後輸出空結果 / 垃圾資料，使用者看到的是「查無結果」。
+            raise WAFPermanentBlockError(
+                "司法院 WAF 在重新整理 cookies 後仍持續擋請求"
+            )
     return r

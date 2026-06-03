@@ -18,7 +18,12 @@ from mcp_server.config import (
 )
 from mcp_server.cache.db import CacheDB
 from mcp_server.parsers.judicial_parser import parse_search_results
-from mcp_server.tools.waf_bypass import JudicialWAFBypass, get_with_waf_retry
+from mcp_server.tools._errors import error_response
+from mcp_server.tools.waf_bypass import (
+    JudicialWAFBypass,
+    WAFPermanentBlockError,
+    get_with_waf_retry,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,11 +110,9 @@ class JudicialSearchClient:
             return cached
 
         if not keyword and not case_number and not main_text:
-            return {
-                "success": False,
-                "error": "至少需要提供 keyword / case_number / main_text 其一",
-                "query": params,
-            }
+            return error_response(
+                "至少需要提供 keyword / case_number / main_text 其一", query=params,
+            )
 
         # ── 精確案號搜尋：case_word + case_number → HTTP GET（快、準） ──
         if params.get("case_word") and params.get("case_number"):
@@ -146,14 +149,14 @@ class JudicialSearchClient:
 
             return data
 
+        except WAFPermanentBlockError:
+            logger.warning("搜尋遭司法院 WAF 硬擋（refresh cookies 後仍被擋）")
+            return error_response(
+                "司法院網站暫時無法通過 WAF 防護，請稍後重試", query=params,
+            )
         except Exception as e:
             logger.error("搜尋失敗: %s (%s)", e, type(e).__name__, exc_info=True)
-            return {
-                "success": False,
-                "error": f"{type(e).__name__}: {e}",
-                "query": params,
-                "timestamp": datetime.now().isoformat(),
-            }
+            return error_response(f"{type(e).__name__}: {e}", query=params)
 
     async def _precise_search_http(
         self, params: dict, max_results: int,
