@@ -83,7 +83,7 @@ FIELD_LABELS: dict[str, str] = {
 }
 
 SYSTEM_PROMPT = (
-    "你是一位台灣法律研究助理，專門協助律師分析法院判決。"
+    "你是一位台灣法律研究助理，專門協助律師分析法院判決、訴願決定等法律文件。"
     "回答時請嚴格遵照指示格式，只輸出 JSON，不加任何其他文字。"
 )
 
@@ -115,6 +115,13 @@ _V1_SUFFIX = _VARIANT_RULES + """
 _V2_SUFFIX = _VARIANT_RULES + """
 
 判決內容如下（各段以【】標示段落類型）：
+{field_text}"""
+
+# 訴願 mode 尾段（訴願決定書、非判決）。marker 與 _SCORING_FIELD_MARKER 不同 →
+# _split_scoring_prompt 走 fallback（單一 user message），Haiku 本就無 cache、無影響。
+_V2_SUFFIX_APPEAL = _VARIANT_RULES + """
+
+訴願決定書內容如下（各段以【】標示段落類型）：
 {field_text}"""
 
 
@@ -254,6 +261,70 @@ ANALYSIS_PROMPT_V2 = ("""\
   "found_in": "excerpt 所在的段落類型：reasoning / facts / main_text / cited_statutes",
   "variant_candidates": []
 }}""" + _V2_SUFFIX)
+
+
+# 訴願 mode prompt：勞動部訴願決定書（行政救濟程序、非法院判決）。
+# 用語改訴願框架：訴願人 / 原處分機關 / 原處分 / 訴願決定（駁回·撤銷·不受理）/ 訴願審議委員會。
+# direction：撤銷原處分 = 支持訴願人；駁回 = 維持原處分。
+ANALYSIS_PROMPT_APPEAL = ("""\
+以下是一份**勞動部訴願決定書**（行政救濟程序，非法院判決）的結構化內容。
+律師研究問題：
+{question}
+
+請閱讀各段落（以【】標示段落類型），回答兩個問題：
+1. 此訴願決定對研究問題的**論述詳細度**（score 0-10）
+2. 訴願決定的**立場方向**是否與律師問題的方向一致（direction）
+
+**訴願程序背景**：訴願人不服「原處分機關」之「原處分」而提起訴願，由訴願審議委員會
+審議、作成「訴願決定」。常見結果：
+- **訴願駁回** = 維持原處分（認原處分並無違法或不當）
+- **原處分撤銷** = 支持訴願人（原處分違法/不當，撤銷或命原處分機關另為適法處分）
+- **訴願不受理** = 程序不合法（逾期、非行政處分、欠缺當事人能力等），未進入實體審查
+
+**各段落的角色**：
+- 【理由】訴願審議委員會的法律分析、法條適用與實體/程序認定（最核心）
+- 【事實】訴願人、原處分機關、原處分內容與訴願事由（導言）
+- 【主文】訴願決定結果（訴願駁回 / 原處分撤銷 / 訴願不受理）
+- 【引用法條】援引之法條（訴願決定常於理由行文中援引、未必另列）
+
+**score 評分標準（0-10）**：
+  0 = 完全沒論述或無關（含純程序性的「訴願不受理」、對實體爭點無著墨）
+  1-3 = 邊緣提及
+  4-6 = 有處理但非核心爭點
+  7-10 = 核心爭點，對實體爭議有詳細論述與認定
+
+**direction 判斷規則（以訴願框架）**：
+  - 若律師問題隱含希望「原處分被推翻」之方向（如「在何種情形撤銷原處分」）：
+    · 訴願決定撤銷原處分 / 支持訴願人主張 → "支持"
+    · 訴願決定駁回 / 維持原處分 → "反對"
+  - 若問題為中性探索（「訴願會如何認定 X」「X 的審查標準」）→ "中性"
+  - 無法判斷 → "中性"
+
+**excerpt 選取規則（分層優先、必須遵守）**：
+
+**第一優先**：從**訴願審議委員會自己的判斷段落**挑（「本部」「本會」「查」「經查」
+「本件」等由訴願機關說話、表達對本案實體/程序認定的段落）。特別優先「原處分是否
+違法/不當、要件是否該當、裁量有無濫用、比例原則」之實質認定段。
+
+**絕對禁止來源**：
+  - 【主文】— 只是結果、律師已知、無新訊息
+  - **訴願人 / 原處分機關的主張、陳述、答辯、略以、訴稱、答辯稱** — 當事人說法不是訴願機關的判斷
+  - 訴願機關**複述**當事人論點的句子（即使段落以「查」開頭、若內容在重述當事人主張仍不算）
+  - 純引述法條條文本身（未套用到本案者）
+
+判準是「這段話是不是**訴願審議委員會在表達自己對本案的認定**」。
+
+若連理由裡都找不到任何非主文、非當事人主張的實質認定段（如純程序不受理），excerpt 留空字串。
+
+請只回傳 JSON，不要任何其他文字：
+{{
+  "score": 0到10的整數,
+  "direction": "支持" | "反對" | "中性",
+  "position": "訴願審議委員會的立場/認定，60字內；若 score=0 留空字串",
+  "excerpt": "依上述分層優先選取的段落原文（必須從決定書原文逐字複製，不得改寫或摘要），200字內；若 score=0 或找不到可用段落才留空字串",
+  "found_in": "excerpt 所在的段落類型：reasoning / facts / main_text / cited_statutes",
+  "variant_candidates": []
+}}""" + _V2_SUFFIX_APPEAL)
 
 
 _default_client: anthropic.AsyncAnthropic | None = None
@@ -677,6 +748,7 @@ async def _call_claude_v2(
     client = _get_client(api_key)
     prompt_template = (
         ANALYSIS_PROMPT_CONS if search_domain == "interpretation"
+        else ANALYSIS_PROMPT_APPEAL if search_domain == "appeal"
         else ANALYSIS_PROMPT_V2
     )
     prompt = prompt_template.format(
@@ -1170,6 +1242,15 @@ def _build_stats_synthesis(results: list[dict]) -> dict:
     }
 
 
+# 訴願 synthesis：SYNTHESIS_PROMPT 本體是判決框架（共用），appeal 時前置用語對應指示。
+_SYNTHESIS_APPEAL_NOTE = (
+    "【重要・本批為勞動部訴願決定書，非法院判決】\n"
+    "下文若出現「判決」請理解為「訴願決定」、「法院」請理解為「訴願審議委員會 / 勞動部」。"
+    "你的 answer 必須用訴願用語（訴願決定 / 訴願審議委員會 / 原處分 / 訴願人 / 駁回·撤銷·不受理），"
+    "不要寫成「法院判決」。\n\n"
+)
+
+
 async def run_synthesis(
     analysis_id: str,
     question: str,
@@ -1195,6 +1276,16 @@ async def run_synthesis(
         }
         await db.set_analysis_synthesis(analysis_id, synthesis)
         return synthesis
+
+    # 訴願 domain → synthesis 用訴願用語（從 analysis → task 取 search_domain，免改 5 個呼叫端）
+    _domain = "judgment"
+    try:
+        _a = await db.get_analysis(analysis_id)
+        _t = await db.get_task(_a.get("task_id")) if _a else None
+        if _t:
+            _domain = _t.get("search_domain") or "judgment"
+    except Exception:
+        pass
 
     client = _get_client(api_key)
     max_items = _SYNTHESIS_MAX_ITEMS
@@ -1223,6 +1314,8 @@ async def run_synthesis(
         prompt = SYNTHESIS_PROMPT.format(
             question=question, n=len(results), listed=listed_count, items=items_text,
         )
+        if _domain == "appeal":
+            prompt = _SYNTHESIS_APPEAL_NOTE + prompt
         estimated_tokens = estimate_prompt_tokens(SYSTEM_PROMPT) + estimate_prompt_tokens(prompt)
 
         try:

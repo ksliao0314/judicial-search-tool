@@ -158,7 +158,24 @@
                     role="radio" aria-checked="false">
               憲法解釋
             </button>
+            <button data-domain="appeal"
+                    class="search-domain-btn home-seg-btn"
+                    role="radio" aria-checked="false">
+              勞動部訴願
+            </button>
           </div>
+        </div>
+
+        <!-- 訴願決定結果篩選（只在「勞動部訴願」模式顯示）-->
+        <div id="appeal-result-row" class="mb-3 hidden">
+          <label for="appeal-result-type" class="block text-[10px] font-mono uppercase tracking-widest text-warm-400 mb-1">決定結果</label>
+          <select id="appeal-result-type"
+                  class="w-full px-3 py-2 text-sm font-serif border border-warm-300 rounded-sm bg-parchment text-ink focus:border-ink focus:outline-none">
+            <option value="">全部</option>
+            <option value="DENY">駁回</option>
+            <option value="REVOKE">撤銷</option>
+            <option value="NOT_ACCEPTED">不受理</option>
+          </select>
         </div>
 
         <!-- Search box（設計版 rounded 8px + ⌘K chip）-->
@@ -840,8 +857,9 @@
       <div class="border border-warm-200 bg-warm-50 rounded-sm px-3 py-2.5">
         <div class="font-mono text-[10px] text-seal uppercase tracking-widest mb-1.5">兩種模式</div>
         <p class="mb-1"><strong>法院判決</strong>：各級法院（含最高、高行、地方法院等）的裁判書全文。</p>
-        <p><strong>憲法解釋</strong>：大法官解釋（釋字第 1-813 號）＋ 新制憲法法庭裁判（111 年起憲判字）。</p>
-        <p class="text-warm-500 text-xs mt-1.5">首頁切換器預設「法院判決」。憲法解釋走獨立資料庫（司法院大法官網），不混一般判決。</p>
+        <p class="mb-1"><strong>憲法解釋</strong>：大法官解釋（釋字第 1-813 號）＋ 新制憲法法庭裁判（111 年起憲判字）。</p>
+        <p><strong>勞動部訴願</strong>：勞動部訴願決定書全文（勞工行政救濟平台）。可加選「決定結果」（駁回／撤銷／不受理）。</p>
+        <p class="text-warm-500 text-xs mt-1.5">首頁切換器預設「法院判決」。憲法解釋走司法院大法官網；勞動部訴願走勞動部訴願系統，皆獨立來源、不混一般判決。</p>
       </div>
 
       <!-- 關鍵字語法（兩模式共通） -->

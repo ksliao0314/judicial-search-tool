@@ -27,13 +27,27 @@ logger = logging.getLogger(__name__)
 # cons get_interpretation 走本機 JSON，也不經此 bucket。
 _mcp_fetch_bucket = TokenBucket(rate_per_minute=60, capacity=30)
 
-async def _fetch_one(jid: str) -> dict:
-    """取得單筆判決，帶重試。
+async def _fetch_one(jid: str, *, source_url: str | None = None) -> dict:
+    """取得單筆判決 / 訴願決定書全文，帶重試。
 
-    依 jid（= case_id）格式 dispatch：
-    - 釋字第N號 / 年憲判字第N號（容忍「司法院」prefix）→ 走 cons get_interpretation
-    - 其他 → 走 FJUD get_judgment
+    dispatch：
+    - source_url 為 appealweb（勞動部訴願）→ get_appeal_decision（詳情頁無驗證碼、
+      不經 MCP / 司法院 bucket）
+    - jid 為 釋字第N號 / 年憲判字第N號（容忍「司法院」prefix）→ cons get_interpretation
+    - 其他 → FJUD get_judgment
     """
+    # 勞動部訴願：詳情頁公開、用 source_url（含 caseId）抓全文
+    if source_url and "appealweb.mol.gov.tw" in source_url:
+        from src.pipeline import appeal_source
+        d = await with_retry(
+            appeal_source.get_appeal_decision,
+            source_url,
+            delays=(3.0, 8.0, 20.0),
+            label=f"get_appeal_decision(…{source_url[-24:]})",
+        )
+        if d is None:
+            raise RuntimeError(f"訴願決定書解析失敗：{source_url}")
+        return d
     from src.pipeline.cons_normalizer import (
         is_interpretation_case_id, normalize_cons_judgment, strip_cons_prefix,
     )

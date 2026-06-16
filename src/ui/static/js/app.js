@@ -326,7 +326,7 @@ function renderHomeActiveItem(t) {
   const bellInfo = state.bell.tasks.get(t.id);
   const progress = bellInfo?.progress || 0;
   const domain = t.search_domain || 'judgment';
-  const tag = domain === 'interpretation' ? '釋' : '判';
+  const tag = _domainTag(domain);
 
   let phaseText = '準備中…';
   const hasPartial = (t.analyses || []).some(a => a.status === 'partial');
@@ -370,7 +370,7 @@ function renderHomeRecentItem(t) {
   const kw = escHtml(getTaskOrigKw(t));
   const domain = t.search_domain || 'judgment';
   const isInterp = domain === 'interpretation';
-  const domainLabel = isInterp ? '釋' : '判';
+  const domainLabel = _domainTag(domain);
 
   const analyses = (t.analyses || []).filter(a => a.status === 'done' && a.match_count != null);
   const primary = analyses.sort((a, b) => (b.match_count || 0) - (a.match_count || 0))[0];
@@ -466,7 +466,7 @@ function renderHistoryCard(t) {
                    isInterp ? 'is-interpretation' : 'is-judgment'].filter(Boolean).join(' ');
 
   // 分類 pill：只顯示「判」或「釋」酒紅字，拿掉「· 法院判決」/「· 憲法解釋」後綴
-  const domainLabel = isInterp ? '釋' : '判';
+  const domainLabel = _domainTag(domain);
 
   const date = (t.created_at || '').slice(5, 10);
 
@@ -647,11 +647,9 @@ function renderHomeTaskItem(t) {
       </svg>
     </button>`;
 
-  // search_domain badge：判 (法院判決、seal 紅) / 釋 (憲法解釋、深藍)
+  // search_domain badge：判 (法院判決) / 釋 (憲法解釋) / 訴 (勞動部訴願)
   const domain = t.search_domain || 'judgment';
-  const domainBadge = domain === 'interpretation'
-    ? `<span class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-sm text-[10px] font-serif bg-indigo-100 text-indigo-700" title="憲法解釋">釋</span>`
-    : `<span class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-sm text-[10px] font-serif bg-seal/10 text-seal" title="法院判決">判</span>`;
+  const domainBadge = _domainBadgeHtml(domain);
 
   return `
     <div class="group flex items-center gap-3 px-4 py-3 border border-warm-200
@@ -704,9 +702,7 @@ function renderTaskGridCard(t) {
         </svg>
       </button>
       <div class="flex items-start gap-2 mb-2 pr-5">
-        ${(t.search_domain || 'judgment') === 'interpretation'
-          ? `<span class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-sm text-[10px] font-serif bg-indigo-100 text-indigo-700" title="憲法解釋">釋</span>`
-          : `<span class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-sm text-[10px] font-serif bg-seal/10 text-seal" title="法院判決">判</span>`}
+        ${_domainBadgeHtml(t.search_domain || 'judgment')}
         <div class="font-serif text-sm text-ink truncate flex-1">${kw}</div>
       </div>
       <div class="flex items-center justify-between">
@@ -1086,14 +1082,15 @@ function applySearchDomain(domain) {
   // 讓右側「搜尋說明」按鈕位置不會隨切換跳動（visibility 保留佈局、display:none 會吃掉）
   const mainTextRow = document.getElementById('home-filter-row');
   if (mainTextRow) {
-    if (domain === 'interpretation') {
-      mainTextRow.style.visibility = 'hidden';
-      mainTextRow.setAttribute('aria-hidden', 'true');
-    } else {
-      mainTextRow.style.visibility = '';
-      mainTextRow.removeAttribute('aria-hidden');
-    }
+    // 主文含（jud_jmain）只對 judgment 有意義；interpretation / appeal 遮起來（保留佈局）
+    const hideMain = (domain === 'interpretation' || domain === 'appeal');
+    mainTextRow.style.visibility = hideMain ? 'hidden' : '';
+    if (hideMain) mainTextRow.setAttribute('aria-hidden', 'true');
+    else mainTextRow.removeAttribute('aria-hidden');
   }
+  // 訴願決定結果選單：只在「勞動部訴願」模式顯示
+  const appealRow = document.getElementById('appeal-result-row');
+  if (appealRow) appealRow.classList.toggle('hidden', domain !== 'appeal');
 }
 document.querySelectorAll('.search-domain-btn').forEach(btn => {
   btn.addEventListener('click', () => applySearchDomain(btn.dataset.domain));
@@ -1312,6 +1309,17 @@ async function handleSearch() {
   return runKeywordSearch(kw);
 }
 
+// search_domain 顯示：判(法院判決·seal) / 釋(憲法解釋·靛) / 訴(勞動部訴願·綠)
+function _domainTag(domain) {
+  return domain === 'interpretation' ? '釋' : domain === 'appeal' ? '訴' : '判';
+}
+function _domainBadgeHtml(domain) {
+  const m = domain === 'interpretation' ? { t: '釋', title: '憲法解釋', cls: 'bg-indigo-100 text-indigo-700' }
+          : domain === 'appeal'         ? { t: '訴', title: '勞動部訴願', cls: 'bg-emerald-100 text-emerald-700' }
+          :                               { t: '判', title: '法院判決', cls: 'bg-seal/10 text-seal' };
+  return `<span class="shrink-0 inline-flex items-center justify-center w-5 h-5 rounded-sm text-[10px] font-serif ${m.cls}" title="${m.title}">${m.t}</span>`;
+}
+
 // 讀首頁 toggle 當前選擇的 search domain；預設 'judgment'
 function getCurrentSearchDomain() {
   const active = document.querySelector('.search-domain-btn[aria-checked="true"]');
@@ -1329,11 +1337,15 @@ function _task_search_domain() {
 function runKeywordSearch(keyword, opts = {}) {
   const domain = getCurrentSearchDomain();
   // 憲法解釋模式：沒 main_text / exhaustive / expand_keywords / year 語意
-  const mainText = domain === 'interpretation'
+  const mainText = (domain === 'interpretation' || domain === 'appeal')
     ? null
     : (document.getElementById('main-text-input')?.value.trim() || null);
   // 年份 filter 只對 judgment mode 生效；未拖動 slider（仍為預設區間）則不傳
   const yearActive = domain === 'judgment' && _homeYearIsActive();
+  // 訴願決定結果（駁回/撤銷/不受理）只在「勞動部訴願」模式傳
+  const resultType = domain === 'appeal'
+    ? (document.getElementById('appeal-result-type')?.value || null)
+    : null;
   return createAndRunTask({
     keyword,
     search_domain: domain,
@@ -1343,6 +1355,7 @@ function runKeywordSearch(keyword, opts = {}) {
     year_from: yearActive ? _homeYear.from : null,
     year_to: yearActive ? _homeYear.to : null,
     original_keyword: opts.originalKeyword || keyword,
+    result_type: resultType,
   });
 }
 
@@ -7874,7 +7887,10 @@ function _buildStarredMarkdown(starredResults, analysis, task) {
       if (position) L.push(`- **法院立場**：${position}`);
       L.push(excerptText ? `- **原文摘錄**${foundIn ? `（${foundIn}）` : ''}：${excerptText}` : '- **原文摘錄**：（無）');
     }
-    if (r.source_url) L.push(`- **司法院原文**：${r.source_url}`);
+    if (r.source_url) {
+      const srcLabel = courtOf(r) === '勞動部' ? '勞動部原文' : '司法院原文';
+      L.push(`- **${srcLabel}**：${r.source_url}`);
+    }
     L.push('');
   });
 
@@ -7989,6 +8005,12 @@ function pdfUrlFromJudgment(judgment) {
 document.getElementById('rc-download-pdf').addEventListener('click', async () => {
   if (!_readerJudgment || !_readerJudgment.source_url) {
     _showReaderToast('此判決無 source_url、無法產生 PDF 連結');
+    return;
+  }
+  // 勞動部訴願決定書無原版 PDF（站台僅提供 HTML 全文）→ 直接開原文頁
+  if (courtOf(_readerJudgment) === '勞動部' || String(_readerJudgment.source_url).includes('appealweb.mol.gov.tw')) {
+    window.open(_readerJudgment.source_url, '_blank', 'noopener');
+    _showReaderToast('訴願決定書無原版 PDF，已開啟原文頁');
     return;
   }
   const tab = window.open('about:blank', '_blank');
@@ -9945,6 +9967,11 @@ function formatFullCitation(judgment) {
   }
 
   const court = courtOf(judgment);
+
+  // 勞動部訴願決定書：court='勞動部' → 「勞動部{字號}訴願決定參照」（字號如「勞動法訴一字第N號」）
+  if (court === '勞動部') {
+    return `勞動部${rawCid}訴願決定參照`;
+  }
 
   // 優先 parseCaseDisplay：多數 task_judgments.case_id 是「臺北高等行政法院...112年度訴字第1234號判決」格式
   const parsed = parseCaseDisplay(rawCid);

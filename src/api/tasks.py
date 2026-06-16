@@ -77,6 +77,11 @@ class CreateTaskRequest(BaseModel):
         default=None,
         description="使用者原始輸入（展開前），用於 UI 顯示。未提供時 fallback 到 keyword。",
     )
+    result_type: str | None = Field(
+        default=None,
+        description="勞動部訴願決定結果篩選（appeal domain 用）：DENY(駁回)/REVOKE(撤銷)/"
+                    "NOT_ACCEPTED(不受理)，None=全部。其他 domain 忽略。",
+    )
 
 
 class CreateTaskResponse(BaseModel):
@@ -97,8 +102,10 @@ async def create_task(
 
     # filter_fields 留空字串（schema NOT NULL 限制）— 新流程不在 task 層級使用，
     # 移到 analyses 端點。mode 預設 'keyword'，semantic 之後再決定怎麼接。
-    if body.search_domain not in ("judgment", "interpretation"):
-        raise HTTPException(status_code=400, detail="search_domain 必須是 'judgment' 或 'interpretation'")
+    if body.search_domain not in ("judgment", "interpretation", "appeal"):
+        raise HTTPException(
+            status_code=400,
+            detail="search_domain 必須是 'judgment' / 'interpretation' / 'appeal'")
     await db.create_task(
         task_id=task_id,
         mode="keyword",
@@ -113,6 +120,7 @@ async def create_task(
             "year_from": body.year_from,
             "year_to": body.year_to,
             "original_keyword": body.original_keyword,
+            "result_type": body.result_type,
             "search_domain": body.search_domain,   # 冗餘存一份給 recovery 用
         },
     )
@@ -127,6 +135,7 @@ async def create_task(
         year_to=body.year_to,
         api_key=x_api_key,
         search_domain=body.search_domain,
+        result_type=body.result_type,
     )
 
     # Stage 1 不走 task_queue — 直接開 asyncio task 並行跑（只打 MCP 拿 metadata）。
@@ -222,7 +231,10 @@ async def get_task_hit_full(task_id: str, case_id: str) -> dict:
     hit = await db.get_task_search_hit(task_id, case_id)
     if not hit:
         raise HTTPException(status_code=404, detail="Hit not found in this task")
-    judgment = await mcp_client.get_judgment(case_id)
+    # 依 hit 的 source_url 分流（appeal→get_appeal_decision / 釋字→get_interpretation /
+    # FJUD→get_judgment），與 Stage 2.5/3 fetch 一致。否則 appeal 字號會被當 FJUD jid 失敗。
+    from src.pipeline.filter import _fetch_one
+    judgment = await _fetch_one(case_id, source_url=hit.get("source_url"))
     # 把 stage 1 的 cause / summary 也帶回（reader 顯示時用得到）
     return {**judgment, "cause": hit.get("cause"), "summary": hit.get("summary")}
 

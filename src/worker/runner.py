@@ -138,6 +138,7 @@ class Stage1SearchWork:
     year_to: int | None = None
     api_key: str | None = None
     search_domain: str = "judgment"
+    result_type: str | None = None   # appeal domain：決定結果篩選 DENY/REVOKE/NOT_ACCEPTED
 
 
 @dataclass
@@ -539,6 +540,10 @@ async def _recover_new_task(task: dict, sp: dict) -> None:
             main_text=sp.get("main_text"),
             year_from=sp.get("year_from"),
             year_to=sp.get("year_to"),
+            # 必帶 domain，否則 appeal/interpretation 重啟會被當 judgment 重跑（搜錯來源）。
+            # 優先 tasks 欄位（get_pending_tasks SELECT t.* 必有）、fallback search_params。
+            search_domain=task.get("search_domain") or sp.get("search_domain") or "judgment",
+            result_type=sp.get("result_type"),
         )
         asyncio.create_task(dispatch_work(work))
         logger.info("恢復新任務 %s stage 1", task["id"])
@@ -1107,6 +1112,13 @@ async def _run_stage25_fetch(work: Stage25FetchWork) -> None:
     cancelled = False
     task_cancelled_exc: TaskCancelledError | None = None   # 任務整個被刪 → gather 後 re-raise
 
+    # appeal hit 的 source_url（含 caseId）→ 讓 _fetch_one 走 get_appeal_decision；
+    # FJUD/釋字 的 source_url 不含 appealweb、_fetch_one 會忽略、行為不變。
+    _hit_url_map = {
+        h["case_id"]: h.get("source_url")
+        for h in await db.get_task_search_hits(task_id)
+    }
+
     # 並行抓取（原為序列逐筆）。global _mcp_fetch_bucket(60/min) 仍序列化真正的 MCP
     # 呼叫，並行主要讓 cache-hit 與司法院回應延遲重疊 → cold-fetch 從「逐筆 latency-bound」
     # 拉到「bucket 上限 bound」（典型 ~3-4x）。並發 create_task_judgment 寫入由 _conn 的
@@ -1156,7 +1168,7 @@ async def _run_stage25_fetch(work: Stage25FetchWork) -> None:
                 return
 
             try:
-                judgment = await _fetch_one(case_id)
+                judgment = await _fetch_one(case_id, source_url=_hit_url_map.get(case_id))
             except Exception as exc:
                 logger.warning("[%s] stage25 跳過 %s：%s", task_id, case_id, exc)
                 skipped += 1
@@ -1289,9 +1301,12 @@ def _flatten_keywords(query: str) -> list[str]:
 async def _run_stage1_search(work: Stage1SearchWork) -> None:
     task_id = work.task_id
 
-    # Dispatch by search_domain — 憲法解釋模式走獨立 pipeline
+    # Dispatch by search_domain — 憲法解釋 / 勞動部訴願各走獨立 pipeline
     if work.search_domain == "interpretation":
         await _run_stage1_search_interpretation(work)
+        return
+    if work.search_domain == "appeal":
+        await _run_stage1_appeal(work)
         return
 
     started = datetime.now(timezone.utc).isoformat()
@@ -1587,6 +1602,93 @@ async def _run_stage1_search_interpretation(work: Stage1SearchWork) -> None:
                 task_id, len(all_hits), elapsed)
 
 
+async def _run_stage1_appeal(work: Stage1SearchWork) -> None:
+    """勞動部訴願模式 Stage 1：search_appeals（Claude Haiku 解驗證碼）→ task_search_hits。
+
+    與 FJUD / 憲法解釋的差異：
+    - 來源為 appealweb.mol.gov.tw 直接 HTTP scrape（非 MCP）
+    - 搜尋擋圖形驗證碼 → Claude vision 解；翻頁免驗證碼（appeal_source 內處理）
+    - 決定結果（駁回/撤銷/不受理）由 work.result_type 壓 server-side 篩選
+    - 全文詳情頁無驗證碼，Stage 2.5 fetch 走 get_appeal_decision（見 filter._fetch_one）
+    - OR 語法（A | B）仍支援：各 group 獨立搜、結果 union
+    """
+    from src.pipeline import analyze as analyze_pipeline
+    from src.pipeline import appeal_source
+
+    task_id = work.task_id
+    started = datetime.now(timezone.utc).isoformat()
+    await _check_task_alive(task_id)
+    await db.update_task(task_id, status="running", started_at=started)
+
+    or_groups = _parse_or_groups(work.keyword) or [work.keyword.strip()]
+    await sse_bus.publish(task_id, "stage1_progress", {
+        "task_id": task_id, "phase": "搜尋訴願決定書中", "hits_so_far": 0,
+    })
+
+    # 驗證碼：Claude Haiku vision（一次搜尋解一張、翻頁免驗證碼）
+    client = analyze_pipeline._get_client(work.api_key)
+
+    async def _solve(image_bytes: bytes) -> str:
+        return await appeal_source.solve_captcha_via_claude(
+            client, image_bytes, model=analyze_pipeline.MODEL_SCORING)
+
+    seen: set[str] = set()
+    all_hits: list[dict] = []
+    attempted = 0
+    failures = 0
+    for kw in or_groups:
+        kws = [k for k in kw.split() if k]
+        if not kws:
+            continue
+        attempted += 1
+        try:
+            rows = await appeal_source.search_appeals(
+                kws, solve_captcha=_solve, result_type=work.result_type)
+        except Exception as exc:
+            logger.warning("[%s] search_appeals(%r) 失敗：%s", task_id, kw, exc)
+            failures += 1
+            continue
+        for r in rows:
+            cid = r.get("case_id") or ""
+            if not cid or cid in seen:
+                continue
+            seen.add(cid)
+            all_hits.append(appeal_source.to_search_hit(r))
+
+    # 全部 group 都失敗（驗證碼解不開 / 站台 503·WAF）→ raise，讓 tasks._bg_stage1 的
+    # except 發 stage1_failed，不要以「0 筆 done」假裝成功（律師會誤判為「查無命中」）。
+    if attempted > 0 and failures == attempted:
+        raise RuntimeError(
+            f"訴願搜尋全部失敗（{failures}/{attempted} 組關鍵字，驗證碼或站台不可用）")
+    appeal_warnings = (
+        [f"部分關鍵字搜尋失敗（{failures}/{attempted} 組，驗證碼/連線），結果可能不完整"]
+        if failures else [])
+
+    logger.info("[%s] stage1 appeal: %d groups → %d unique hits（%d 組失敗）",
+                task_id, len(or_groups), len(all_hits), failures)
+    await db.bulk_insert_task_search_hits(task_id, all_hits)
+
+    finished = datetime.now(timezone.utc).isoformat()
+    await db.update_task(task_id, status="done", finished_at=finished)
+    elapsed = _elapsed_sec(started, finished)
+
+    sp = await db.get_task(task_id)
+    try:
+        sp_dict = json.loads(sp.get("search_params") or "{}") if sp else {}
+    except (json.JSONDecodeError, TypeError):
+        sp_dict = {}
+    sp_dict["expanded_variants"] = list(or_groups)
+    await db.update_task(task_id, search_params=json.dumps(sp_dict, ensure_ascii=False))
+
+    await sse_bus.publish(task_id, "stage1_done", {
+        "task_id": task_id, "hits_total": len(all_hits),
+        "truncated": False, "elapsed_sec": elapsed, "warnings": appeal_warnings,
+    })
+    await sse_bus.publish(task_id, "task_done", {"task_id": task_id, "elapsed_sec": elapsed})
+    await sse_bus.publish_done(task_id)
+    logger.info("[%s] stage1 appeal 完成，%d hits，耗時 %ds", task_id, len(all_hits), elapsed)
+
+
 # ---------------------------------------------------------------------------
 # 兩階段搜尋 — Stage 3（narrow + fetch + 字串過濾 + Claude 精讀）
 # ---------------------------------------------------------------------------
@@ -1715,7 +1817,7 @@ async def _run_reasoning_prefilter(work: ReasoningPreFilterWork) -> None:
                 reused += 1
             else:
                 try:
-                    raw = await _fetch_one(case_id)
+                    raw = await _fetch_one(case_id, source_url=hit.get("source_url"))
                     ft = raw.get("full_text") or ""
                     extracted = extract_citations(ft) if ft else []
                     ec_serialized = [list(c.as_tuple()) for c in extracted] if extracted else None
@@ -1910,7 +2012,7 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
             else:
                 async with fetch_sem:
                     try:
-                        judgment = await _fetch_one(case_id)
+                        judgment = await _fetch_one(case_id, source_url=hit.get("source_url"))
                     except Exception as exc:
                         logger.warning("[%s] stage3 fetch 跳過 %s：%s", task_id, case_id, exc)
                         skipped_cases.append({"case_id": case_id, "error": str(exc)[:100]})
@@ -2471,6 +2573,12 @@ async def _run_retry_skipped(
             logger.info("[%s] retry-skipped no-op: skipped_case_ids empty", task_id)
             return
 
+        # appeal skipped case 的 source_url（retry 才能走 get_appeal_decision，否則字號被當 FJUD jid）
+        _hit_url_map = {
+            h["case_id"]: h.get("source_url")
+            for h in await db.get_task_search_hits(task_id)
+        }
+
         logger.info("[%s] retry-skipped 開始：%d 筆", task_id, len(skipped))
         await sse_bus.publish(task_id, "retry_skipped_start", {
             "task_id": task_id, "analysis_id": analysis_id, "total": len(skipped),
@@ -2485,7 +2593,7 @@ async def _run_retry_skipped(
         async def _retry_fetch_one(jid: str, idx: int) -> None:
             async with fetch_sem:
                 try:
-                    judgment = await _fetch_one(jid)
+                    judgment = await _fetch_one(jid, source_url=_hit_url_map.get(jid))
                 except Exception as exc:
                     logger.warning("[%s] retry-skipped fetch 仍失敗 %s：%s",
                                    task_id, jid, str(exc)[:100])

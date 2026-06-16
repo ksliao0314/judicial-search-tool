@@ -4,12 +4,13 @@
 -- 現在保留但語意不同 — **這個欄位專指搜尋 pipeline mode**：
 --   'keyword'（legacy）  — 原舊語意，任務都是這個值；2026-04 前的所有資料
 --   'semantic'（legacy）  — 從未真正使用過，但 schema 保留
--- 新欄位 `search_domain` 才是我們的主角（'judgment' | 'interpretation'）。
+-- 新欄位 `search_domain` 才是我們的主角（'judgment' | 'interpretation' | 'appeal'；
+-- 值域為開放清單，新增 domain 只需放行於 tasks.py，**勿加 CHECK constraint**）。
 -- 原本想重用 mode 但怕 legacy 資料帶 'keyword' 字串被解讀為新語意，故另起欄位。
 CREATE TABLE IF NOT EXISTS tasks (
     id            TEXT PRIMARY KEY,   -- UUID
     mode          TEXT NOT NULL,      -- 'keyword' | 'semantic'（legacy，全是 keyword）
-    search_domain TEXT NOT NULL DEFAULT 'judgment',  -- 'judgment'（法院判決）| 'interpretation'（憲法解釋）
+    search_domain TEXT NOT NULL DEFAULT 'judgment',  -- 'judgment'（法院判決）| 'interpretation'（憲法解釋）| 'appeal'（勞動部訴願）
     keyword       TEXT NOT NULL,      -- 搜尋關鍵字（多個空格分隔）
     filter_fields TEXT NOT NULL,      -- 過濾欄位（逗號分隔）
     status        TEXT NOT NULL,      -- pending | running | done | failed
