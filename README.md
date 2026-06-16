@@ -6,7 +6,7 @@
 三個搜尋域切換：
 - **法院判決（FJUD）**— 對 `data.aspx` 全文搜尋，涵蓋民事 / 刑事 / 行政 / 懲戒、全法院層級
 - **憲法解釋**— 對 `cons.judicial.gov.tw` 搜尋憲法法庭判決 + 司法院大法官解釋，由 [`cons_normalizer.py`](src/pipeline/cons_normalizer.py) normalize 成 FJUD-shape
-- **勞動部訴願**— 對 `appealweb.mol.gov.tw`（勞工行政救濟平台）爬取訴願決定書全文，由 [`appeal_source.py`](src/pipeline/appeal_source.py) 提供 search / fetch；搜尋頁驗證碼用 Claude vision 解、翻頁免驗證碼、詳情頁公開（見技術決策 #12）
+- **勞動部訴願**— 對 `appealweb.mol.gov.tw`（勞工行政救濟平台）爬取訴願決定書全文，由 [`appeal_source.py`](src/pipeline/appeal_source.py) 提供 search / fetch；搜尋頁驗證碼用 Claude vision 解、翻頁免驗證碼、詳情頁公開（見技術決策 #19）
 
 三域共用同一套 reader / filter / analyze / synthesis / 匯出 pipeline，只各自換來源 adapter 與 prompt。
 
@@ -77,29 +77,49 @@ Citation(law, article, sub, paragraph, item, subitem)
 
 #### 同義詞 tier 展開邏輯
 
-法律用語多種寫法（「僱傭 / 雇用 / 雇傭」/「古蹟 / 古績」/ 簡稱 / 異體字），搜尋時要能自動展開、但不能把「不等價」的詞誤當同義（會把搜尋結果打爛）。用 4 tier 分離：
+法律用語多種寫法（「僱傭 / 雇傭」異體字、「暫時處分 / 假處分」別寫法 / 簡稱 / 繁簡變體），搜尋時要能自動展開、但不能把「不等價」的詞誤當同義（會把搜尋結果打爛）。用 4 tier 分離、**discovery 來的一律 candidate、必須律師手動確認才能升 confirmed 生效於搜尋**：
 
-| Tier | 行為 | 來源 |
+| Tier | 搜尋時行為 | 來源 |
 |---|---|---|
-| **`confirmed`** | 自動展開、列入搜尋變體 | 律師手動確認；或啟動時從 `law_abbreviations.json`（72 組法律簡稱）+ `synonym_seed.json`（3 組事務所確認一般用語）同步進來 |
-| **`candidate`** | 律師待審，**不自動展開**。UI 顯示候選名單供一鍵 promote 到 confirmed | LLM 基於判決樣本自動建議 |
-| **`likely_typo`** | 疑似錯字、**不展開**但保留關聯（律師可看到「這個詞可能是錯字」提示）| 規則偵測 + LLM 輔助判斷 |
-| **`rejected`** | 律師明確標記「非等價」、永不展開、永不再建議 | 律師手動 reject |
+| **`confirmed`** | 自動展開、進搜尋變體池 | 律師在「待確認」按 ✓ 一次即進（生效於下次搜尋）、或啟動時 seed 檔同步進來（`law_abbreviations.json` 72 組法律簡稱、`synonym_seed.json` 事務所 seed）|
+| **`candidate`** | **不自動展開**、在設定面板「待確認」section 顯示給律師審核 | **Stage 3 精讀時 Claude 順便 discover 的變體**（主要來源）|
+| **`likely_typo`** | 不展開 | 初次 upsert 時 corpus_hits 1–5 分進這檔（corpus 幾乎查不到、高機率是 LLM 幻覺）|
+| **`rejected`** | 永不展開、不再建議 | 律師按 ✕ 一次即進（永不再建議）、或 corpus_hits=0 |
 
-搜尋展開流程（`synonym_expander.py`）：
+**主流程（discovery-driven、律師手動確認）**：
+
+```
+Stage 3 精讀每筆判決時、Claude prompt 帶 do_discovery=True
+  ↓ 順便列出判決裡看到的 variant candidates（如「僱傭」→「雇傭」「僱庸」）
+  ↓
+_persist_discovered_variants 寫 synonym_dictionary
+  ↓ 強制 candidate tier（即使 corpus_hits ≥ 50 也不自動升 confirmed）
+  ↓ 為什麼：Claude 會把「雇主」「勞僱契約」這種**不同法律概念**誤判為同義
+  ↓        corpus 命中再高也不能 auto 生效、必須律師把關
+  ↓
+律師打開「設定 → 同義詞庫 → 待確認」section
+  ↓ 按 ✓ → 立即升 confirmed、下次搜尋會自動展開
+  ↓ 按 ✕ → 立即降 rejected、永不再建議
+  ↓
+下次搜尋 → 展開 pipeline 只取 confirmed tier、candidate 不進搜尋變體
+```
+
+**FE ↔ backend 實作細節**：`approveSynonym` / `rejectSynonym` handler 連發 **3 次** `/api/synonym-feedback`、一次打滿 backend 的 `_AUTO_PROMOTE_ACCEPTS=3` / `_AUTO_DEMOTE_REJECTS=2` threshold（見 `src/db/database.py`）。Threshold 是 defensive 設計、讓未來若有 automated feedback 源、不會一次誤升 confirmed。律師體感是 **✓/✕ 一次即生效**。
+
+**搜尋展開實際路徑（`synonym_expander.py`）**：
 
 ```
 律師輸入「僱傭」
   ↓
-查 synonym_dictionary（confirmed tier）
-  → 取 {「僱傭」, 「雇用」, 「雇傭」} 所在 group
+查 synonym_dictionary（only_confirmed=True）
+  → 取 tier='confirmed' 的 variants：{「僱傭」, 「雇傭」, 「僱庸」}（律師確認過的）
   ↓
-展開後 keyword list: ["僱傭", "雇用", "雇傭"]
-  ↓
-每個變體分別打司法院 search（並行）→ 結果合併去重
+展開後 keyword list 丟 stage 1 窮盡搜尋（cartesian product + union）
 ```
 
-律師可在 UI「同義詞管理」面板（[`src/api/expansion.py`](src/api/expansion.py)）看所有 tier、手動 promote / reject。Confirmed tier 寫入 `synonym_dictionary` 表**跨 task 共用**，律師一次確認終身有效。
+**Seed 檔**：`law_abbreviations.json`（72 組法律簡稱、如「勞基法 ↔ 勞動基準法」）+ `synonym_seed.json`（事務所用語）啟動時同步進字典、直接進 confirmed tier、不用律師逐一確認。見 `runner.py` 的 `sync_law_abbreviations_to_synonyms` / `sync_synonym_seed_to_dict`。
+
+**`synonym_dictionary` 表跨 task 共用**、律師 feedback 終身累積、律所多人共用時效益最大。律師在事務所持續用、candidate 清單會自然收斂成事務所特有的用語庫。
 
 流程全圖見下方「[Stage 流程](#stage-流程4-階段律師主動推進)」段。
 
@@ -190,18 +210,18 @@ Tab 切換純 client-side 過濾（零 API call）。閱讀器的 A/D/J/K 上下
 
 #### (B) 同義關鍵字候選名單
 
-法律用語多種寫法（「僱傭 / 雇用 / 雇傭」/「古蹟 / 古績」），搜尋時需要自動展開同義組。
+法律用語多種寫法（「僱傭 / 雇傭」異體字、「暫時處分 / 假處分」別寫法），搜尋時需要自動展開同義組。
 
-Tier 設計：
+Tier 設計（**discovery 一律 candidate、律師按 ✓ 一次即升 confirmed、✕ 一次即 rejected**）：
 
-| Tier | 行為 | 來源 |
+| Tier | 搜尋時行為 | 來源 |
 |---|---|---|
-| `confirmed` | 自動展開、列入搜尋變體 | 律師手動確認、或 `law_abbreviations.json`（72 組）+ `synonym_seed.json`（3 組）同步進來 |
-| `candidate` | 律師待審，不自動展開 | LLM 基於判決樣本建議 |
-| `likely_typo` | 疑似錯字、不展開但保留關聯 | 規則 / LLM 判斷 |
-| `rejected` | 明確非等價、不展開 | 律師明確標記 |
+| `confirmed` | 自動展開、進搜尋變體 | 律師按 ✓ 一次即進、或 seed 檔進來（`law_abbreviations.json` 72 組 / `synonym_seed.json`）|
+| `candidate` | 不自動展開、UI 待確認清單 | Stage 3 精讀時 Claude 順便 discover |
+| `likely_typo` | 不展開 | 初次 upsert 時 corpus_hits 1–5 |
+| `rejected` | 不展開、不再建議 | 律師按 ✕ 一次即進、或 corpus_hits=0 |
 
-Confirmed tier 永久存 `synonym_dictionary` 表，跨 task 共用。律師在 stage 1 可看候選列表、手動調整。實作在 [src/pipeline/synonym_expander.py](src/pipeline/synonym_expander.py) + [src/api/expansion.py](src/api/expansion.py)。
+Confirmed tier 永久存 `synonym_dictionary` 表、跨 task 共用。搜尋 pipeline 用 `only_confirmed=True` 模式只取 confirmed。實作在 [src/pipeline/synonym_expander.py](src/pipeline/synonym_expander.py) + [src/api/expansion.py](src/api/expansion.py)；精讀 discovery 在 [src/pipeline/analyze.py `_persist_discovered_variants`](src/pipeline/analyze.py)。律師在「設定 → 同義詞庫 → 待確認」逐一 ✓ ✕ 建自己事務所的用語庫。FE handler 連發 3 次 feedback 一次打滿 backend threshold、律師體感為一鍵生效。
 
 ---
 
@@ -268,6 +288,114 @@ Stage 3   律師輸入精讀問題 → POST /analyses → worker 對每筆跑 Cl
 
 ---
 
+## Stage 3 進階控制：中止 / 續跑 / 定稿（2026-04-19 新設計）
+
+律師長時間任務中最常見的需求：**跑到一半看出苗頭了、想提早停下看初步結果**。
+這節描述三組對 scoring phase 的控制動作、何時觸發哪條路徑。
+
+### 三個 endpoint
+
+| Endpoint | 用途 | 適用狀態 |
+|---|---|---|
+| `POST /api/tasks/{tid}/analyses/{aid}/abort` | 律師按「中止」| `running` or `pending`（命中 ≥ 3 才走 graceful，否則前端自動改走 kill-worker） |
+| `POST /api/tasks/{tid}/analyses/{aid}/resume` | 律師按「繼續未完成的分析」| `partial`（atomic check-and-set、防 double-click race） |
+| `POST /api/tasks/{tid}/analyses/{aid}/finalize` | 律師按「就用現在結果定稿」| 有 `synthesis_is_preliminary=1` 即可；running 情境也走即時升格 |
+
+### 中止（Abort）— 三條路徑依當下狀態分流
+
+```
+                        │
+       按「中止分析」    │ 按「中止並查看目前結果」
+                        │
+           ▼                                ▼
+  ┌─ fetch 階段 ─────┐    ┌─ scoring ≥ 3 命中 ─────────────┐
+  │ DELETE /fetch-   │    │ POST /abort                    │
+  │  judgments       │    │ → set graceful_abort flag      │
+  │ + kill-worker    │    │ → fire-and-forget background   │
+  │ → State A        │    │   _fire_abort_partial_synthesis│
+  └──────────────────┘    │ → run_synthesis（5-15 秒）     │
+                          │ → 寫 status='partial'          │
+  ┌─ scoring < 3 命中 ┐   │ → publish stage3_partial_done  │
+  │ DELETE /fetch-    │   │   is_final=False               │
+  │  judgments        │   │ → FE 切 State C 看 partial    │
+  │ + kill-worker     │   └────────────────────────────────┘
+  │ → State A         │
+  └───────────────────┘
+```
+
+- **判準用 `match_count`（命中數）而非 `rows_done`（已分析數）**：沒命中 synthesis 不出東西
+- Fast path 跑 synthesis 前會 double-check `_is_graceful_abort` 旗是否還在（防 `/resume` race）
+- Synthesis call 失敗時寫 fallback synthesis（`_fallback=True`）+ SSE、避免 FE 永卡「AI 綜合分析中…」
+
+### 續跑（Resume）
+
+```
+POST /resume
+  → atomic UPDATE WHERE status='partial' SET status='running'  (防 double-click)
+  → _clear_graceful_abort（清掉先前 /abort 留下的旗）
+  → 新 Stage3AnalyzeWork dispatch
+  → run_analysis_v2 streaming 模式、already_done_ids 跳過已分析筆數
+  → total = expected_total（剩餘）+ already_done_count（UI 進度正確反映「全量」）
+```
+
+續跑不 reset `completed` / `match_count` / `analysis_results`、只追補剩下的。
+
+### 定稿（Finalize）— 兩條路徑
+
+```
+POST /finalize
+  │
+  ├─ 有 preliminary synthesis（含 running 情境）─────────┐
+  │   status == 'running' ⇒ 同時設 graceful_abort + finalize 旗
+  │                       讓背景 scoring workers cooperative 停下
+  │   DB 立即升格：status='done'、is_preliminary=0
+  │   Publish stage3_synthesis_done with is_final=True
+  │   回 response body `is_final=True`
+  │   → FE 可直接 re-render 不等 SSE（0 延遲）
+  │
+  └─ 無 preliminary、scoring 剛開始（罕見）────────────┐
+      只設 finalize 旗、回 `is_final=False`
+      Retry loop 邊界 check 後升格
+      → FE 等 SSE + 5 秒 fallback check 保險
+```
+
+### SSE 事件（新增）
+
+- `stage3_partial_done`：abort graceful path 完成、partial synthesis 可看。payload 含 `done`, `total`, `match_count`, `is_final`, `synthesis`。`is_final=False` = 律師還能 /resume 或 /finalize；`is_final=True` = 已升格 done
+- `stage3_cancelled`：命中 <3 的情境、status→cancelled、不跑 synthesis
+
+### UI 狀態機
+
+```
+State A  任務面板 / 判決清單
+State B  scoring 進度畫面（live feed + ticker）
+State C  分析結果畫面（synthesis + 判決列表）
+
+           Stage 3 start
+               ↓
+           State B ──── 中止 / scoring<3 命中 ───→ State A（kill-worker）
+               │
+               │ 中止 / scoring≥3 命中 → partial synthesis
+               ↓
+           State C ─── 繼續未完成的分析 ──→ State B（續跑）
+               │       (狀態：partial→running、banner「重開中」→「初步結果」)
+               │
+               └─ 就用現在結果定稿 → State C 最終版（banner 消失）
+```
+
+**Banner 文案切換邏輯**（`renderCardSynthesis` 依 `analysis.status` + `is_preliminary`）：
+- `running + is_preliminary=1 + total<=completed` → 「重開中 · 任務重開中…」（transient、等 backend 更新 total）
+- `running + is_preliminary=1 + total>completed` → 「初步結果 · 仍在分析剩餘 N 筆」+ [查看進度][定稿]
+- `partial + is_preliminary=1` → 「已中止 · 停於 X/Y（命中 K）」+ [繼續未完成的分析][定稿]
+- `status ∈ {failed, cancelled, done}` → 一律不顯示 banner
+
+### 相關 in-memory flags（uvicorn lifecycle 內）
+
+- `_graceful_abort_requested: set[str]` — /abort 設、/resume 清、scoring-end branch 清
+- `_finalize_requested: set[str]` — /finalize running 路徑設、retry loop 讀到 break
+
+---
+
 ## 快速開始
 
 ### 系統需求
@@ -280,7 +408,7 @@ Stage 3   律師輸入精讀問題 → POST /analyses → worker 對每筆跑 Cl
 ### 安裝
 
 ```bash
-cd judgment-search
+cd judicial-search-tool
 
 # Python venv（用 uv 也行）
 python3.12 -m venv .venv
@@ -315,7 +443,7 @@ API key 在 UI 設定面板輸入（會存 localStorage、走 subprocess env 傳
 .venv/bin/python -m pytest tests/
 ```
 
-目前 82 個測試（citation extractor、filter、worker、anomaly_log、5 件真實判決 fixture regression）。`tests/inspect_*.py` / `validate_*.py` 是 ad-hoc 工具不歸 pytest。
+目前 198 個測試（citation extractor、filter、worker、anomaly_log、5 件真實判決 fixture regression、abort/resume/finalize 語意）。`tests/inspect_*.py` / `validate_*.py` 是 ad-hoc 工具不歸 pytest。
 
 ---
 
@@ -442,11 +570,79 @@ judgment-search/
 **Trade-off**：6000+ 行 app.js 維護壓力較大。`core.js` 抽 state 與 API wrapper、`app.js` 放主邏輯、`init.js` 放啟動 hook。dev mode hot reload 靠 uvicorn `--reload`（Python 改才 reload，JS/CSS 改 browser refresh 即可）。
 
 ### 11. 全程 SSE 而非 WebSocket
-**Why**：通訊只有 server → client（進度推）、不需要 client → server。SSE over HTTP 比 WebSocket 簡單、好除錯、好過 proxy。
 
-**怎麼做**：`sse_bus.py` 用 `asyncio.Queue` per task_id 做 pub/sub。事件類型：`stage25_progress / judgments_ready / batch_done / analysis_done / task_done / stage25_cancelled`。前端用 `EventSource` 訂閱 `/api/tasks/{id}/stream`。
+SSE 單向（server→client）就夠用、省掉 WebSocket 的雙向 framing + close handshake 複雜度、而且跟 FastAPI 的 async generator 原生合拍。前端用標準 `EventSource`、不用額外 lib、斷線 auto-reconnect 免處理。
 
-### 12. 勞動部訴願：直接爬 appealweb + Claude 解驗證碼
+### 12. 窮盡搜尋的 MCP failure retry（2026-04-19）
+
+`run_search_exhaustive` 會用 date cursor 反覆對 MCP 下探、直到某輪拿到 <500 筆視為「抓到底」。**但 MCP 一次性呼叫失敗（network ReadError / 司法院 WAF 拒連）也會讓 hits 回傳 0 筆**、被誤判成抓到底提早結束（原本沒這段時、「公法上不當得利」這類大量 keyword 卡在 1000 筆）。
+
+修法：
+- `mcp_client.search_judgments` 偵測 `{"success": False}` → raise `MCPSearchError`（原本吞成空 list）
+- `_exhaustive_single_keyword` 加 3 次 retry with exponential backoff（1s→2s→4s）
+- 3 次都失敗才 break、log warning 告知累積筆數（律師能看）
+
+### 13. F5 WAF cookies 的雙層自動 refresh
+
+司法院網站 F5 WAF cookies（`mcp-taiwan-legal-db/data/.judicial_cookies.json`）過期後（~24 小時），**TCP 層 reset connection**、httpx 丟 `ReadError` / `ConnectError`。原本 `get_with_waf_retry` 只在 `is_blocked(r.text)` 為 True 時 refresh、但 network-level 錯誤根本沒 response body、refresh 不會觸發 → 永遠失敗。
+
+修法（見 `mcp-taiwan-legal-db/mcp_server/tools/waf_bypass.py`）：
+```python
+try:
+    r = await func(url, **kwargs)
+except (httpx.ReadError, httpx.ConnectError, httpx.RemoteProtocolError):
+    # network-level → refresh cookies + retry
+    await waf.refresh()
+    ...
+if waf.is_blocked(r.text):
+    # body-level block → refresh + retry
+    ...
+```
+
+### 14. 中止的三段式設計：disruptive vs graceful
+
+律師按「中止分析」的實際行為依當下狀態自動選路徑（不給律師選、邏輯自動判）：
+
+| 階段 | 路徑 | 按鈕文案 |
+|---|---|---|
+| Fetch 階段（progressPhase='fetch'）| Disruptive：`DELETE /fetch-judgments` + `kill-worker` → State A | 「中止分析」|
+| Scoring + match_count < 3 | Disruptive（沒結果可保留）→ State A | 「中止分析」|
+| Scoring + match_count ≥ 3 | Graceful：`POST /abort` + 背景跑 partial synthesis → State C | 「中止並查看目前結果」|
+
+判準用 `match_count`（命中數）而非 `rows_done`（已分析數）：沒命中的判決再多、synthesis 也只會輸出「精讀後沒有判決有論述此問題」、partial 無意義。
+
+**Graceful path 的 in-flight edge**：已進入 `_run_and_report` 的判決（最多 CONCURRENCY=8 筆）會跑完才釋放 worker；若 Claude 卡住、律師按中止後 15 秒自動出現「強制結束」按鈕（走 kill-worker、丟 8 筆 in-flight 資料）。
+
+### 15. Finalize 即時升格（不等 retry loop）
+
+Preliminary synthesis（partial / preliminary watcher 寫）升格成 final 的路徑：
+
+- 原設計（2026-04-19 前）：`/finalize` 設 flag、等 retry loop 下一輪邊界 check 才升格 → 若 scoring 第一輪還在跑、律師可能乾等 1 分鐘
+- 新設計：`/finalize` 有 `synthesis_is_preliminary=1` 就**立即 DB 升格** `status=done`、`is_preliminary=0`、同時設 `graceful_abort` 旗讓 scoring cooperative 停下；回 response body `is_final=True`、FE 立即 re-render（不等 SSE）
+- 兩旗並存時（abort + finalize）**abort 不覆寫已升格的 done**（scoring-end branch re-read analysis、status=done+synthesis → skip）
+
+### 16. 「任何中止都是 partial」（2026-04-19 決策）
+
+原設計中「續跑中再中止 → 升格 done（was_resumed→done）」實測不好用：律師以為只是想提早看結果、沒想到被鎖進 done。改成：
+
+- **任何中止都寫 partial**、保留 `is_preliminary=1`、可重複續跑
+- **升格 done 只有兩條路**：scoring 自然跑完、或律師主動按「就用現在結果定稿」
+
+### 17. `task_judgments` 的 case_id 格式陷阱
+
+MCP `get_judgment` 正常回傳 `case_id` 為人類案號（「108年度訴字第1145號」）、`source_url` 含 JID（`TPBA,108,訴,1145,20220414,3`）。**但歷史上某些 parser 失敗情境、MCP 回空 judgment dict with `case_id = JID`（fallback 到外層 jid 變數）、然後被 `create_task_judgment` 存入 DB**。結果：task_judgments 某些 row 的 `case_id=JID` + 內容全空。
+
+律師看起來就是「N 筆 data_error」。修法：
+- 短期：SQL 刪這些壞 rows、下次 resume 會重抓（MCP 現在 parser 正常會有內容）
+- 長期 TODO：`create_task_judgment` 加 guard — 若內容全空拒寫 + 記 anomaly log
+
+### 18. MCP search cache key 不含 max_results（latent bug）
+
+MCP server 的 `search_cache` query_params 只記錄 keyword + 日期範圍等、**不含 `max_results`**。若某次測試用 `max_results=10` 查詢、MCP cache 把「這個 query 的結果是 10 筆」固化、之後 `max_results=500` 的查詢也回那 10 筆。
+
+現況：實務上窮盡搜尋永遠用 `max_results=500`、synonym_expander 用 `max_results=1`、兩者互不觸及相同 cache key（因為 synonym 用不同 keyword 變體）。Latent bug、不急修。若跑 ad-hoc debug 測試時一定用 `max_results=500` 或用不同 keyword、免污染 cache。
+
+### 19. 勞動部訴願：直接爬 appealweb + Claude 解驗證碼
 **Why**：勞動部開放資料 API（`apiservice.mol.gov.tw`）的訴願資料集只有統計 / 案號索引、**無決定書全文**，無法做 AI 精讀。真正全文在訴願決定書查詢系統 `appealweb.mol.gov.tw`（ASP.NET Core MVC），但搜尋頁有 5 碼圖形驗證碼。
 
 **怎麼做**（[`appeal_source.py`](src/pipeline/appeal_source.py)）：
@@ -456,6 +652,8 @@ judgment-search/
 - **訴願不是判決**：`ANALYSIS_PROMPT_APPEAL` 用訴願人 / 原處分機關 / 訴願審議委員會用語、direction 改訴願框架（撤銷原處分=支持訴願人 / 駁回=維持原處分）。
 
 **Trade-off**：自動化會辨識搜尋頁驗證碼，以低速率 + 退避禮貌抓公開訴願決定書。訴願**無原版 PDF**（站台僅 HTML 全文）→ reader「下載 PDF」改開原文頁、匯出 .md 標「勞動部原文」。recovery 重啟必帶 `search_domain` 否則被當 judgment 搜錯來源。
+
+SSE 事件類型清單（供 FE 訂閱參考）：`stage25_progress / judgments_ready / batch_done / stage3_synthesis_start / stage3_synthesis_done / stage3_partial_done / stage3_cancelled / preliminary_synthesis_done / analysis_done / analysis_failed / task_done`。前端用 `EventSource` 訂閱 `/api/tasks/{id}/stream`。
 
 ---
 
@@ -493,6 +691,40 @@ jq -r 'select(.anomaly_types[] == "outline_number_gap") | .metrics.outline_gaps'
 偵測規則、閾值調整、完整 jq recipe 見 [`src/utils/anomaly_log.py`](src/utils/anomaly_log.py) 模組 docstring 與開發者 memory `~/.claude/projects/.../memory/parser_anomaly_log.md`。
 
 **文化約定**：新增或調整 parser heuristic 前，先跑上述 jq 查詢確認當前痛點；改完後搭配 `tests/test_judgment_structure_regression.py` 的 5 件 fixture 守門避免退步。長期看 anomaly log 類型分布的趨勢（某種 anomaly 類型從月均 50 降到 5，即為 heuristic 改動成功的量化證據）。
+
+### 用 `data/excerpt_anomalies.jsonl` 觀察 Claude excerpt 品質
+
+2026-04-20 加的 V2 prompt 規則、強制 Claude 從**法院判斷段落**挑 excerpt、禁止主文 / 當事人主張 / 證人證述。落實程度用這個 log 監測、每週看一次、決定是否要加後處理 re-pick。
+
+**偵測三種異常**（見 [`src/utils/excerpt_anomaly_log.py`](src/utils/excerpt_anomaly_log.py)）：
+
+| Kind | 意義 | 觸發時該做什麼 |
+|---|---|---|
+| `party_claim_prefix` | excerpt 開頭匹配「原告/被告/上訴人/…（所有程序當事人）…主張/抗辯/略以」 | > 10% → Claude 不聽話、加後處理從 reasoning 選「本院…」段替換 |
+| `main_text_leak` | excerpt 是 `main_text` 子字串 | 應近零；> 5% 代表 prompt 禁止主文規則失效、收緊 prompt |
+| `empty_but_scored` | score > 0 但 excerpt 空 | > 10% 代表 prompt 過嚴、Claude over-correct 找不到可用段落、放寬規則 / fallback 更聰明 |
+
+**每週觀察配方**：
+```bash
+# 各類觸發比例
+jq -r '.kind' data/excerpt_anomalies.jsonl | sort | uniq -c | sort -rn
+
+# 最常違規的 case → 看是哪種判決格式讓 Claude 失手（簡易裁定？釋字？）
+jq -r '.case_id' data/excerpt_anomalies.jsonl | sort | uniq -c | sort -rn | head
+
+# party_claim_prefix 的 excerpt 實例、看 Claude 到底取了什麼、調整 prompt
+jq -r 'select(.kind == "party_claim_prefix") | .excerpt_preview' \
+   data/excerpt_anomalies.jsonl | head -20
+
+# empty_but_scored 的 case — prompt 太嚴的徵兆
+jq -r 'select(.kind == "empty_but_scored") | [.case_id, .score] | @tsv' \
+   data/excerpt_anomalies.jsonl | head -20
+```
+
+**決策門檻**：
+- 三類觸發都 **< 5%** → Prompt 就夠了、不必後處理
+- `party_claim_prefix` ≥ 10% → 加 post-process re-pick
+- `empty_but_scored` ≥ 10% → 放寬 prompt（可能太嚴苛、讓 Claude 找不到可用段落）
 
 ### 加新分析欄位（如 court_tier, citation_density）
 1. `schema.sql` 加欄位
@@ -735,13 +967,21 @@ cd mcp-taiwan-legal-db && pip wheel . -w ../wheels/
 
 ### Fork 維護與 commit pin
 
-部署時務必 freeze fork commit hash，避免下次 deploy silent drift：
-```bash
-cd mcp-taiwan-legal-db && git rev-parse HEAD > ../FORK_COMMIT
-# Production: 對 deploy 包驗證 FORK_COMMIT 內容
-```
+**本 repo 的 MCP fork 已 flatten 進 monorepo**（`mcp-taiwan-legal-db/` 沒 `.git`）—
+便於同事單次 `git clone` 就能拿到完整可跑的版本。對應 upstream fork 的快照：
 
-upstream `mcp-taiwan-legal-db` 改動時，需要手動 merge 進 fork。Fork 已改的清單在 README「重要技術決策 #1」— merge 衝突主要會出現在 `judicial_parser.py`（我們加的 `_insert_outline_breaks`）與 `judicial_search.py`（max_results clamp、month/day params）。
+- **Upstream**：https://github.com/lawchat-oss/mcp-taiwan-legal-db
+- **當前 snapshot commit**：`e946840`（fork: port month/day params 到 upstream 新版 JudicialSearchClient）
+- Fork 自己的 3 個 commit（領先 upstream）：`e946840` / `fdebd22` / `059d658`
+
+維護 workflow（要 sync upstream 時）：
+1. 去原始有 `.git` 的 MCP fork 工作目錄（個人本機 `judgment-search/mcp-taiwan-legal-db/`）做 `git pull` + 合併
+2. 跑 `tests/regenerate_fixtures.py` + `pytest` 確認沒 regression
+3. 記下新的 commit hash
+4. `rsync -a --exclude='.git' --exclude='data/cache/' .../mcp-taiwan-legal-db/ ./mcp-taiwan-legal-db/` 覆蓋
+5. 更新本段記錄的 snapshot commit hash + commit
+
+upstream 改動時主要合併衝突點：`judicial_parser.py`（我們加的 `_insert_outline_breaks`）、`judicial_search.py`（max_results clamp、month/day params）、`waf_bypass.py`（network-level error auto-refresh、2026-04-19 加的）。
 
 ### 容易忘的維運
 
