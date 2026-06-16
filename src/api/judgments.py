@@ -325,6 +325,10 @@ async def resolve_pdf_url(
 
 class BulkPdfRequest(BaseModel):
     case_ids: list[str]
+    # 前端組好的「AI 評價與綜合彙整」Markdown，一併打包進同一個 zip（一次下載拿 PDF + 摘要）。
+    # 內容由前端產（重用 reader 的 citation / 評價解析 helper），後端只負責寫檔。
+    markdown: str | None = None
+    md_filename: str | None = None
 
 
 # 司法院 PDF 批次抓取：concurrency 限到 2 避免觸發 WAF rate-limit
@@ -451,7 +455,16 @@ async def download_bulk_pdf(task_id: str, body: BulkPdfRequest):
                 lines.append(f"  · {cid}  —  {reason}")
             zf.writestr("_失敗清單.txt", "\n".join(lines).encode("utf-8"))
 
-    if success == 0:
+        # 前端組好的「AI 評價與綜合彙整」.md 一併打包進同一個 zip
+        if body.markdown:
+            md_name = (body.md_filename or "AI評價與綜合彙整.md")
+            md_name = md_name.replace("　", "").replace("/", "_").replace("\\", "_").strip()
+            if not md_name.lower().endswith(".md"):
+                md_name += ".md"
+            zf.writestr(md_name[:120] or "AI評價與綜合彙整.md", body.markdown.encode("utf-8"))
+
+    # 全部 PDF 失敗時：若有 .md 仍回傳 zip（至少給摘要 + 失敗清單）；否則才報錯
+    if success == 0 and not body.markdown:
         raise HTTPException(
             status_code=502,
             detail=f"全部 {len(targets)} 筆判決抓取失敗：{failures[0][1] if failures else 'unknown'}",

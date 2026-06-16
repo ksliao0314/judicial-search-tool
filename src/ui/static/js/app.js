@@ -7803,8 +7803,88 @@ function buildCombinedText() {
 // Event handlers
 document.getElementById('rc-close').addEventListener('click', () => closeReaderCard());
 
-// Download starred PDFs (bulk zip) — 抓司法院原版 PDF 打包
-// backend /bulk-pdf 以 concurrency 5 平行抓、失敗的會寫入 zip 內的 _失敗清單.txt
+// ─── 匯出「AI 綜合彙整 + 各標記判決評價與摘要」為 Markdown ───
+// downloadStarredPdfs 用：把當前分析層的 synthesis，與各標記判決的 AI 評價/摘要組成 .md，
+// 隨 bulk-pdf 一同打包進 zip。每個案件的評價嚴格對應該案的 court + 案號（取自同一個 result
+// 物件，零錯位）。reason/excerpt 的 [支持]/[理由] 前綴解析、CONSENSUS_LABEL、formatFullCitation
+// 全部沿用 reader 既有 helper，確保用語與畫面一致。
+function _buildStarredMarkdown(starredResults, analysis, task) {
+  const isInterp = task?.search_domain === 'interpretation';
+  const today = new Date().toISOString().slice(0, 10);
+  const kw = (task?.keyword || '（未命名任務）').trim();
+  const question = (analysis?.question || '').trim();
+  const L = [];
+
+  L.push(`# 判決研究匯出：${kw}`, '');
+  if (question) L.push(`- **分析問題**：${question}`);
+  L.push(`- **匯出時間**：${today}`);
+  L.push(`- **標記判決**：${starredResults.length} 件`, '');
+
+  // ── AI 綜合彙整（整個分析層一份；synthesis 是 JSON 字串）──
+  let synth = null;
+  if (analysis?.synthesis) {
+    try { synth = JSON.parse(analysis.synthesis); } catch { synth = null; }
+  }
+  if (synth) {
+    L.push('---', '', '## AI 綜合彙整', '');
+    const meta = CONSENSUS_LABEL[synth.consensus] || CONSENSUS_LABEL['不足'];
+    const totalRel = synth.total_relevant;
+    L.push(`**${meta.text}**${typeof totalRel === 'number' ? `（相關判決 ${totalRel} 件）` : ''}`, '');
+    if (synth.summary) L.push(String(synth.summary).trim(), '');  // 保留 **bold** markdown
+    const clusters = Array.isArray(synth.clusters) ? synth.clusters.filter(c => c && c.label) : [];
+    if (clusters.length) {
+      L.push('**主題分群**', '');
+      for (const c of clusters) {
+        let cnt = Array.isArray(c.case_ids) ? c.case_ids.length : 0;
+        try { if (typeof countClusterMatches === 'function') cnt = countClusterMatches(c); } catch { /* 用 case_ids 長度 fallback */ }
+        L.push(`- ${c.label}（${cnt} 件）`);
+      }
+      L.push('');
+    }
+    if (synth._fallback) L.push('> ⚠️ 此綜合彙整為統計降級版（AI 綜整未成功），建議於工具內重新生成。', '');
+  }
+
+  // ── 各標記判決的評價與摘要 ──
+  L.push('---', '', `## 標記判決評價與摘要（${starredResults.length} 件）`, '');
+  starredResults.forEach((r, i) => {
+    const court = courtOf(r) || '';
+    const parsed = parseCaseDisplay(r.case_id || '');
+    const caseNum = parsed.caseNum;
+    // caseNum 存在（一般判決）→「{court} {案號}」；否則（釋字/憲判字）case_id 本身已是完整字號
+    const title = caseNum ? `${court} ${caseNum}`.trim() : (r.case_id || court || '未知案號').trim();
+    L.push(`### ${i + 1}. ${title}`, '');
+
+    const citation = formatFullCitation(r);
+    if (citation) L.push(`引用格式：${citation}`, '');
+
+    const score = r.primary_score ?? r.score ?? 0;
+    if (score === 0) {
+      L.push('- **AI 評分**：0 / 10', '- AI 評：此判決對研究問題未有實質論述。');
+    } else {
+      const rawReason = r.primary_reason ?? r.reason ?? '';
+      const rawExcerpt = r.primary_excerpt ?? r.excerpt ?? '';
+      // 與 _buildAiEvalBlock 同一組 regex：reason→[direction]+position、excerpt→[found_in]+text
+      const dirMatch = rawReason.match(/^\[(支持|反對|中性)\]\s*(.*)$/s);
+      const direction = isInterp ? '' : (dirMatch ? dirMatch[1] : '');
+      const position = (dirMatch ? dirMatch[2] : rawReason).trim();
+      const exMatch = rawExcerpt.match(/^\[(理由|主文|事實|引用法條|全文)\]\s*(.*)$/s);
+      const foundIn = exMatch ? exMatch[1] : '';
+      const excerptText = (exMatch ? exMatch[2] : rawExcerpt).trim();
+      L.push(`- **AI 評分**：${score} / 10${direction ? `　**立場**：${direction}` : ''}`);
+      if (position) L.push(`- **法院立場**：${position}`);
+      L.push(excerptText ? `- **原文摘錄**${foundIn ? `（${foundIn}）` : ''}：${excerptText}` : '- **原文摘錄**：（無）');
+    }
+    if (r.source_url) L.push(`- **司法院原文**：${r.source_url}`);
+    L.push('');
+  });
+
+  L.push('---', `_由判決檢索工具匯出 · ${today}_`, '');
+  return L.join('\n');
+}
+
+// Download starred PDFs (bulk zip) — 抓司法院原版 PDF 打包 + 一同匯出 AI 評價/綜合彙整 .md
+// backend /bulk-pdf 以 concurrency 2 平行抓、失敗的會寫入 zip 內的 _失敗清單.txt；
+// 前端組好的 .md 字串隨 body 傳入，後端 writestr 進同一個 zip
 async function downloadStarredPdfs() {
   const taskId = state.card.taskId || state.currentTaskId;
   if (!taskId) return;
@@ -7822,6 +7902,18 @@ async function downloadStarredPdfs() {
     return;
   }
 
+  // 組「綜合彙整 + 各標記判決評價與摘要」.md，隨 zip 一同打包（前端組字串、後端 writestr）
+  const analysis = (state.analyses || []).find(a => a.id === state.card.analysisId) || null;
+  const task = state.tasks.find(t => t.id === taskId) || null;
+  let markdown = null, mdFilename = null;
+  try {
+    markdown = _buildStarredMarkdown(starredInTask, analysis, task);
+    const kwSafe = (task?.keyword || '判決').replace(/[\\/:*?"<>|　\s]+/g, '_').slice(0, 40);
+    mdFilename = `AI評價與綜合彙整_${kwSafe}.md`;
+  } catch (e) {
+    console.warn('[bulk-pdf] 組 markdown 失敗，仍照常下載 PDF：', e);
+  }
+
   // 提示中：抓取需要時間（每筆 1-3 秒 depending on 司法院 server）
   const btn = document.querySelector('[data-action="download-starred"]');
   const orig = btn ? btn.innerHTML : null;
@@ -7833,7 +7925,7 @@ async function downloadStarredPdfs() {
   try {
     const res = await apiFetch(`/api/tasks/${taskId}/judgments/bulk-pdf`, {
       method: 'POST',
-      body: JSON.stringify({ case_ids: caseIds }),
+      body: JSON.stringify({ case_ids: caseIds, markdown, md_filename: mdFilename }),
     });
     if (!res.ok) {
       const text = await res.text();
@@ -7925,26 +8017,25 @@ document.getElementById('rc-download-pdf').addEventListener('click', async () =>
   }
 });
 
-// Star toggle — optimistic update + DB persist
-document.getElementById('rc-star').addEventListener('click', async () => {
+// Star toggle — optimistic update + DB persist。click 與鍵盤快捷鍵（S）共用同一邏輯。
+// withToast：鍵盤觸發時給 toast 回饋（按鈕在工具列、律師可能正在看內文沒注意到星標變化）。
+async function _toggleReaderStar({ withToast = false } = {}) {
   if (!_readerJudgment) return;
   const analysisId = state.card.analysisId;
   if (!analysisId) { _showReaderToast('星標需在某個分析層內才能標記'); return; }
   const caseId = _readerJudgment.case_id;
   const starBtn = document.getElementById('rc-star');
+  if (!starBtn) return;
   const wasStarred = state.starred.has(caseId);
-  // Optimistic UI
-  if (wasStarred) {
-    state.starred.delete(caseId);
-    starBtn.querySelector('svg').setAttribute('fill', 'none');
-    starBtn.classList.remove('text-amber-500');
-    starBtn.classList.add('text-warm-400');
-  } else {
-    state.starred.add(caseId);
-    starBtn.querySelector('svg').setAttribute('fill', 'currentColor');
-    starBtn.classList.add('text-amber-500');
-    starBtn.classList.remove('text-warm-400');
-  }
+  const paint = (filled) => {
+    starBtn.querySelector('svg').setAttribute('fill', filled ? 'currentColor' : 'none');
+    starBtn.classList.toggle('text-amber-500', filled);
+    starBtn.classList.toggle('text-warm-400', !filled);
+  };
+  // Optimistic UI + state
+  if (wasStarred) state.starred.delete(caseId); else state.starred.add(caseId);
+  paint(!wasStarred);
+  if (withToast) _showReaderToast(wasStarred ? '已取消標記' : '已標記 ★');
   // Persist
   try {
     const res = await apiFetch(API.caseStar(analysisId, caseId), {
@@ -7954,19 +8045,12 @@ document.getElementById('rc-star').addEventListener('click', async () => {
   } catch (err) {
     console.error('[star] 持久化失敗，rollback:', err);
     // Rollback UI + state
-    if (wasStarred) {
-      state.starred.add(caseId);
-      starBtn.querySelector('svg').setAttribute('fill', 'currentColor');
-      starBtn.classList.add('text-amber-500');
-      starBtn.classList.remove('text-warm-400');
-    } else {
-      state.starred.delete(caseId);
-      starBtn.querySelector('svg').setAttribute('fill', 'none');
-      starBtn.classList.remove('text-amber-500');
-      starBtn.classList.add('text-warm-400');
-    }
+    if (wasStarred) state.starred.add(caseId); else state.starred.delete(caseId);
+    paint(wasStarred);
+    if (withToast) _showReaderToast('標記失敗，已還原');
   }
-});
+}
+document.getElementById('rc-star').addEventListener('click', () => _toggleReaderStar());
 document.getElementById('reader-card-backdrop').addEventListener('click', () => {
   // 點背景 = 全部關閉（閱讀器 + 分析結果卡片）→ 回首頁
   document.getElementById('reader-card-backdrop').classList.add('hidden');
@@ -8149,6 +8233,7 @@ document.addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if (k === 'j' || k === 'd') { _navigateJudgment(1); e.preventDefault(); }
   else if (k === 'k' || k === 'a') { _navigateJudgment(-1); e.preventDefault(); }
+  else if (k === 's') { _toggleReaderStar({ withToast: true }); e.preventDefault(); }  // 標記/取消標記當前判決
 });
 
 // ─── Reader 閱讀進度條 ─────────────────────────────
