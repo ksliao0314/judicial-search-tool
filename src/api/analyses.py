@@ -92,6 +92,14 @@ async def add_analysis(
     narrow_dict = body.narrow.model_dump(exclude_none=True) if body.narrow else {}
     ai_read_fields_str = "reasoning,main_text,facts,cited_statutes"
 
+    # F1：持久化 Stage 3 啟動參數，讓 server 重啟 recovery / retry 能還原正確母體
+    stage3_params = None
+    if body.prefilter_case_ids or body.reasoning_filter:
+        stage3_params = {
+            "prefilter_case_ids": body.prefilter_case_ids,
+            "reasoning_filter": bool(body.reasoning_filter),
+        }
+
     await db.create_analysis(
         analysis_id=analysis_id,
         task_id=task_id,
@@ -99,6 +107,7 @@ async def add_analysis(
         ai_read_field=ai_read_fields_str,
         filter_fields=None,           # v2 不用 string pre-filter
         narrow_state=narrow_dict,
+        stage3_params=stage3_params,
         status="pending",
     )
 
@@ -376,9 +385,12 @@ async def retry_analysis(
 
     # 清除舊的 analysis_results
     await db.delete_analysis_results(analysis_id)
-    # 重置 analysis 狀態
+    # 重置 analysis 狀態。synthesis_is_preliminary 一併清 0：若被 retry 的 analysis 曾產過
+    # preliminary synthesis（flag=1），不清會留下 synthesis=null 但 flag=1 的不一致狀態，
+    # 重跑全程顯示「初步」chip 卻無對應 synthesis。
     await db.update_analysis(
-        analysis_id, status="pending", completed=0, match_count=0, synthesis=None,
+        analysis_id, status="pending", completed=0, match_count=0,
+        synthesis=None, synthesis_is_preliminary=0,
     )
     # 恢復 task 狀態（如果 task 也被標 failed 的話）
     if task["status"] == "failed":
@@ -389,6 +401,11 @@ async def retry_analysis(
         narrow = json.loads(analysis.get("narrow_state") or "{}")
     except (json.JSONDecodeError, TypeError):
         narrow = {}
+    # F1：還原 Stage 3 啟動參數，否則 retry 會走錯母體（整個 narrow 而非選定子集）
+    try:
+        _s3p = json.loads(analysis.get("stage3_params") or "{}")
+    except (json.JSONDecodeError, TypeError):
+        _s3p = {}
     ai_read = (analysis.get("ai_read_field") or "").split(",")
     read_facts = "facts" in ai_read
     work = Stage3AnalyzeWork(
@@ -398,6 +415,8 @@ async def retry_analysis(
         read_facts=read_facts,
         narrow=narrow,
         api_key=x_api_key,
+        prefilter_case_ids=_s3p.get("prefilter_case_ids"),
+        reasoning_filter=bool(_s3p.get("reasoning_filter", False)),
     )
 
     # Bypass task_queue — 併發執行，dispatch_work 內部 semaphore(5) 控上限。
@@ -551,15 +570,26 @@ async def quick_followup(
     )
 
     from src.pipeline.analyze import run_quick_followup
-    synthesis = await run_quick_followup(
-        analysis_id=analysis_id,
-        source_analysis_id=body.source_analysis_id,
-        question=body.question,
-        original_question=source["question"],
-        api_key=x_api_key,
-    )
-    await db.update_analysis(analysis_id, status="done",
-                             match_count=len(synthesis.get("relevant_case_ids", [])))
+    # analysis 已以 status='running' 建立；run_quick_followup 內部 DB 寫入若拋例外
+    # （如 SQLite busy_timeout 內拿不到鎖）會讓 row 永久卡 'running'、前端轉圈無 retry 出口
+    # （/retry 只接受 failed）。包 try/except：失敗時 mark failed + 回明確錯誤，律師可重新追問。
+    try:
+        synthesis = await run_quick_followup(
+            analysis_id=analysis_id,
+            source_analysis_id=body.source_analysis_id,
+            question=body.question,
+            original_question=source["question"],
+            api_key=x_api_key,
+        )
+        await db.update_analysis(analysis_id, status="done",
+                                 match_count=len(synthesis.get("relevant_case_ids", [])))
+    except Exception as exc:
+        logger.exception("[%s] quick-followup 失敗：%s", task_id, exc)
+        try:
+            await db.update_analysis(analysis_id, status="failed")
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail=f"快速追問失敗：{str(exc)[:200]}")
 
     return {
         "analysis_id": analysis_id,

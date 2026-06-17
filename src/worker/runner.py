@@ -139,6 +139,7 @@ class Stage1SearchWork:
     api_key: str | None = None
     search_domain: str = "judgment"
     result_type: str | None = None   # appeal domain：決定結果篩選 DENY/REVOKE/NOT_ACCEPTED
+    law_name: str | None = None      # appeal domain：案件類別（lawName 字串），None=全部
 
 
 @dataclass
@@ -544,6 +545,7 @@ async def _recover_new_task(task: dict, sp: dict) -> None:
             # 優先 tasks 欄位（get_pending_tasks SELECT t.* 必有）、fallback search_params。
             search_domain=task.get("search_domain") or sp.get("search_domain") or "judgment",
             result_type=sp.get("result_type"),
+            law_name=sp.get("law_name"),
         )
         asyncio.create_task(dispatch_work(work))
         logger.info("恢復新任務 %s stage 1", task["id"])
@@ -566,11 +568,25 @@ async def _recover_new_task(task: dict, sp: dict) -> None:
     for analysis in analyses:
         if analysis["status"] not in ("pending", "running"):
             continue
+        # quick_followup 是同步一次性 Claude call、沒有可恢復的 worker 語意。用
+        # Stage3AnalyzeWork 重派會對整個 base dataset 重跑逐筆 scoring（行為錯且昂貴）。
+        # 直接 mark failed，律師可重新追問（1 次 call、秒級）。
+        if (analysis.get("ai_read_field") or "") == "quick_followup":
+            await db.update_analysis(analysis["id"], status="failed")
+            logger.info("[%s] quick_followup 分析 %s 不可恢復 → mark failed",
+                        task["id"], analysis["id"])
+            continue
         if env_api_key:
             try:
                 narrow = json.loads(analysis.get("narrow_state") or "{}")
             except (json.JSONDecodeError, TypeError):
                 narrow = {}
+            # F1：還原 Stage 3 啟動參數（prefilter_case_ids / reasoning_filter）。不還原
+            # 會讓重建走 narrow 路徑分析「整個 narrow 母體」而非律師選定的子集（靜默污染 + 多燒 token）。
+            try:
+                _s3p = json.loads(analysis.get("stage3_params") or "{}")
+            except (json.JSONDecodeError, TypeError):
+                _s3p = {}
             ai_read = (analysis.get("ai_read_field") or "").split(",")
             read_facts = "facts" in ai_read
             work = Stage3AnalyzeWork(
@@ -580,6 +596,8 @@ async def _recover_new_task(task: dict, sp: dict) -> None:
                 read_facts=read_facts,
                 narrow=narrow,
                 api_key=env_api_key,
+                prefilter_case_ids=_s3p.get("prefilter_case_ids"),
+                reasoning_filter=bool(_s3p.get("reasoning_filter", False)),
             )
             asyncio.create_task(dispatch_work(work))
             logger.info(
@@ -769,7 +787,18 @@ async def _execute_work(work: "WorkItem") -> None:
         try:
             analysis_id = getattr(work, "analysis_id", None)
             task_id = getattr(work, "task_id", None)
+            work_type = getattr(work, "type", None)
             error_msg = str(exc)[:200]
+            if work_type == "stage1_search" and task_id:
+                # recovery 重派的 Stage1SearchWork 失敗：發專屬 stage1_failed（前端搜尋卡片
+                # 有對應 handler 重置 spinner），而非 analysis_failed（搜尋卡片不認、會卡 spinner）。
+                # 與正常 API 路徑 tasks._bg_stage1 的失敗處理對齊（含 publish_done sentinel）。
+                await db.update_task(task_id, status="failed")
+                await sse_bus.publish(task_id, "stage1_failed", {
+                    "task_id": task_id, "error": error_msg,
+                })
+                await sse_bus.publish_done(task_id)
+                return
             if analysis_id:
                 await db.update_analysis(analysis_id, status="failed")
             if task_id:
@@ -1327,6 +1356,9 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
 
     # 每個 OR group 獨立展開，產出自己的 combo 列表
     all_combos: list[tuple[str, ...]] = []
+    # 與 all_combos 平行：每個 combo 屬於哪個 OR group（early-stop 須 group-local，
+    # 否則前一 group 尾端連續 0-delta 會在跑到下一 group 前 break，靜默丟整條 OR 分支）
+    combo_group_ids: list[int] = []
     # 跨 group 合計的 raw keyword（扁平）— 用於 UI 顯示
     raw_keywords: list[str] = []
     # 所有展開後的變體（扁平、去重）— 存進 task.search_params 供 reader 高亮使用
@@ -1335,7 +1367,7 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
     MAX_AND_QUERIES = 20
     combo_truncated = False
 
-    for group_query in or_groups_raw:
+    for group_idx, group_query in enumerate(or_groups_raw):
         group_raw_keywords = [kw.strip() for kw in group_query.split() if kw.strip()]
         if not group_raw_keywords:
             continue
@@ -1363,6 +1395,7 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
         import itertools
         combos = list(itertools.product(*variant_groups))
         all_combos.extend(combos)
+        combo_group_ids.extend([group_idx] * len(combos))
 
     if len(all_combos) > MAX_AND_QUERIES:
         logger.warning(
@@ -1371,6 +1404,7 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
         )
         combo_truncated = True
         all_combos = all_combos[:MAX_AND_QUERIES]
+        combo_group_ids = combo_group_ids[:MAX_AND_QUERIES]
 
     # 為了相容下游（combo 變數名）
     combos = all_combos
@@ -1420,12 +1454,24 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
     # 阈值 2（不是 1）避免誤停：有時某 combo 臨時 0 命中（法院 cache miss）下一個又恢復。
     zero_delta_combos = 0
     EARLY_STOP_THRESHOLD = 2
+    # early-stop 須 group-local：跨 OR group 邊界重置計數、且觸發時只跳過「本 group 其餘
+    # combo」而非 break 整個迴圈（否則前一 group 尾端的 0-delta 會吞掉後面整條 OR 分支）。
+    _prev_group_id: int | None = None
+    _skip_group = False
 
     for combo_idx, combo in enumerate(combos, start=1):
         cur_total = await db.count_task_search_hits(task_id)
         if cur_total >= STAGE1_HARD_CAP:
             logger.info("[%s] stage1 已達 hard cap %d，停止後續 combo", task_id, STAGE1_HARD_CAP)
             break
+        cur_group_id = combo_group_ids[combo_idx - 1] if combo_idx - 1 < len(combo_group_ids) else 0
+        if cur_group_id != _prev_group_id:
+            # 進入新 OR group：early-stop 計數歸零、解除上一 group 的 skip 旗標
+            zero_delta_combos = 0
+            _skip_group = False
+            _prev_group_id = cur_group_id
+        if _skip_group:
+            continue  # 本 group 已 early-stop，跳過其餘 combo（但續跑下一 group）
         await _check_task_alive(task_id)
         and_query = " ".join(combo)
         remaining = STAGE1_HARD_CAP - cur_total
@@ -1467,13 +1513,16 @@ async def _run_stage1_search(work: Stage1SearchWork) -> None:
         delta = new_total - prev_total
         if delta == 0:
             zero_delta_combos += 1
-            remaining_combos = len(combos) - combo_idx
-            if zero_delta_combos >= EARLY_STOP_THRESHOLD and remaining_combos > 0:
+            # 只算「本 group 內剩餘的 combo」，跨 group 不納入（避免誤判可跳過量）
+            remaining_in_group = sum(
+                1 for g in combo_group_ids[combo_idx:] if g == cur_group_id
+            )
+            if zero_delta_combos >= EARLY_STOP_THRESHOLD and remaining_in_group > 0:
                 logger.info(
-                    "[%s] stage1 連續 %d 個變體無新 hit，提前終止（省 %d 個剩餘變體）",
-                    task_id, zero_delta_combos, remaining_combos,
+                    "[%s] stage1 group %d 連續 %d 個變體無新 hit，跳過本 group 其餘 %d 個變體",
+                    task_id, cur_group_id, zero_delta_combos, remaining_in_group,
                 )
-                break
+                _skip_group = True  # 跳過本 group 剩餘 combo，但續跑下一 OR group
         else:
             zero_delta_combos = 0
 
@@ -1636,18 +1685,25 @@ async def _run_stage1_appeal(work: Stage1SearchWork) -> None:
     all_hits: list[dict] = []
     attempted = 0
     failures = 0
+    truncated = False
     for kw in or_groups:
+        # 迴圈內也檢查 task 存活：appeal scrape 可長達數分鐘（多 group × 多頁 × 驗證碼重試），
+        # 律師中途刪 task 要能即時中止，且避免跑完才對已刪 task bulk_insert 觸發 FK violation。
+        await _check_task_alive(task_id)
         kws = [k for k in kw.split() if k]
         if not kws:
             continue
         attempted += 1
         try:
             rows = await appeal_source.search_appeals(
-                kws, solve_captcha=_solve, result_type=work.result_type)
+                kws, solve_captcha=_solve, result_type=work.result_type,
+                law_name=work.law_name)
         except Exception as exc:
             logger.warning("[%s] search_appeals(%r) 失敗：%s", task_id, kw, exc)
             failures += 1
             continue
+        if len(rows) >= appeal_source.APPEAL_SEARCH_CAP:
+            truncated = True   # 該 group 撞單組上限 → 結果被截斷（下方推 warning + truncated 旗標）
         for r in rows:
             cid = r.get("case_id") or ""
             if not cid or cid in seen:
@@ -1660,12 +1716,20 @@ async def _run_stage1_appeal(work: Stage1SearchWork) -> None:
     if attempted > 0 and failures == attempted:
         raise RuntimeError(
             f"訴願搜尋全部失敗（{failures}/{attempted} 組關鍵字，驗證碼或站台不可用）")
-    appeal_warnings = (
-        [f"部分關鍵字搜尋失敗（{failures}/{attempted} 組，驗證碼/連線），結果可能不完整"]
-        if failures else [])
+    appeal_warnings: list[str] = []
+    if failures:
+        appeal_warnings.append(
+            f"部分關鍵字搜尋失敗（{failures}/{attempted} 組，驗證碼/連線），結果可能不完整")
+    if truncated:
+        appeal_warnings.append(
+            f"結果已達單組上限 {appeal_source.APPEAL_SEARCH_CAP} 筆，可能有更多訴願決定未納入；"
+            f"建議加上案件類別/決定結果或更精確的關鍵字縮小範圍")
+    if attempted == 0:
+        appeal_warnings.append("未偵測到有效關鍵字（請確認輸入，例如別只輸入「|」或空白）")
 
-    logger.info("[%s] stage1 appeal: %d groups → %d unique hits（%d 組失敗）",
-                task_id, len(or_groups), len(all_hits), failures)
+    logger.info("[%s] stage1 appeal: %d groups → %d unique hits（%d 組失敗、truncated=%s）",
+                task_id, len(or_groups), len(all_hits), failures, truncated)
+    await _check_task_alive(task_id)   # bulk_insert 前最後一道：避免對已刪 task INSERT 觸發 FK
     await db.bulk_insert_task_search_hits(task_id, all_hits)
 
     finished = datetime.now(timezone.utc).isoformat()
@@ -1682,7 +1746,7 @@ async def _run_stage1_appeal(work: Stage1SearchWork) -> None:
 
     await sse_bus.publish(task_id, "stage1_done", {
         "task_id": task_id, "hits_total": len(all_hits),
-        "truncated": False, "elapsed_sec": elapsed, "warnings": appeal_warnings,
+        "truncated": truncated, "elapsed_sec": elapsed, "warnings": appeal_warnings,
     })
     await sse_bus.publish(task_id, "task_done", {"task_id": task_id, "elapsed_sec": elapsed})
     await sse_bus.publish_done(task_id)
@@ -2092,6 +2156,11 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
         a_now = await db.get_analysis(analysis_id) or {}
         completed_now = a_now.get("completed", 0)
         total_now = a_now.get("total", fetch_total)
+        # 防呆：completed 不應超過 total。two_pass 跨輪 pass-mode 漂移可能短暫讓
+        # completed > total（生產 DB 有 1645/1614 類紀錄）→ 顯示給律師時 clamp，
+        # 避免進度條超過 100% / 剩餘負數。
+        if total_now and completed_now and completed_now > total_now:
+            completed_now = total_now
         match_count_now = a_now.get("match_count", 0)
         event = {
             "task_id": task_id, "analysis_id": analysis_id,
@@ -2105,6 +2174,14 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
             try:
                 cur_in  = int(usage.get("scoring_input", 0) or 0)
                 cur_out = int(usage.get("scoring_output", 0) or 0)
+                # _scoring_persisted 是跨整個 _run_stage3_analyze 的 high-water-mark，但每個
+                # run_analysis_v2 invocation（主跑後的 retry iteration）的 cur_in 都「從 0 重起算」。
+                # 若 cur 比 persisted 小，代表進入新 run → baseline 歸零，否則 delta=max(0,cur-persisted)
+                # 恆為 0、retry 階段的 scoring tokens 永遠不會寫進 DB（成本系統性低估）。
+                if cur_in < _scoring_persisted["input"]:
+                    _scoring_persisted["input"] = 0
+                if cur_out < _scoring_persisted["output"]:
+                    _scoring_persisted["output"] = 0
                 delta_in  = max(0, cur_in  - _scoring_persisted["input"])
                 delta_out = max(0, cur_out - _scoring_persisted["output"])
                 if delta_in or delta_out:
@@ -2354,6 +2431,26 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
     finalize_intercepted = False
     prev_missing_set: set[str] = set()
 
+    # F2/F3 防跨分析污染：list_missing_judgments 只按 task_id scope、會回傳同 task 下
+    # 「別的 analysis 抓進共享 task_judgments、但本 analysis 沒評過」的判決。task_judgments
+    # 是 task 層級跨 analysis 共用，故 retry 前須先把 missing 收斂到「本 analysis 實際該評的
+    # 範圍」，否則會把律師明確排除的判決評進本 analysis 結果集。
+    allowed_case_ids: set[str] = set()
+    if work.reasoning_filter:
+        # 理由過濾：只有命中理由關鍵字的才該被評分；其餘 narrowed 雖在 task_judgments，
+        # 是被理由 gate 刻意排除的，不可在 retry 補評。reasoning_matched_ids 已是 formatted case_id。
+        allowed_case_ids = set(reasoning_matched_ids)
+    else:
+        # narrow / prefilter 路徑：narrowed 即本 analysis 該評的範圍。經 _scope_map 把 hit 的
+        # jid/case_id 映射成 task_judgments 的 formatted case_id（與 missing 同空間）。
+        _scope_judgments = await db.get_task_judgments(task_id)
+        _scope_map = _build_judgment_map(_scope_judgments)
+        for _h in narrowed:
+            _k = _h.get("jid") or _h.get("case_id") or ""
+            _j = _scope_map.get(_k)
+            if _j:
+                allowed_case_ids.add(_j["case_id"])
+
     while retry_iteration < MAX_RETRY_ITERATIONS:
         if _is_graceful_abort(analysis_id):
             logger.info("[%s] 律師按「中止」→ 中止 retry loop（已跑 %d 輪）",
@@ -2365,6 +2462,8 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
                         task_id, retry_iteration)
             break
         missing = await db.list_missing_judgments(task_id, analysis_id)
+        # 收斂到本 analysis 範圍（F2/F3）：剔除別的 analysis 抓進 task_judgments 的判決
+        missing = [c for c in missing if c in allowed_case_ids]
         if not missing:
             break
         missing_set = set(missing)
@@ -2383,6 +2482,7 @@ async def _run_stage3_analyze(work: Stage3AnalyzeWork) -> None:
                 case_id_filter=missing,
                 search_keywords=truncation_keywords,
                 search_domain=search_domain,
+                is_rescore=True,  # 保留主跑 total/completed，只補評小子集
             ) or {}
             scoring_usage["scoring_input"] = (
                 scoring_usage.get("scoring_input", 0) + retry_usage.get("scoring_input", 0)
@@ -2676,6 +2776,7 @@ async def _run_retry_skipped(
                     discovery_keyword=discovery_keyword,
                     search_keywords=truncation_keywords,
                     search_domain=search_domain,
+                    is_rescore=True,  # 保留主跑 total/completed，只補評救回的子集
                 )
             except Exception as exc:
                 logger.warning("[%s] retry-skipped scoring 錯誤：%s", task_id, exc)

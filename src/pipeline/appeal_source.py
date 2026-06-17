@@ -31,6 +31,10 @@ _COURT = "勞動部"
 
 # 決定結果（rulingBookResultType）：站台 select 的代碼 → 中文。供 UI 給使用者選。
 RESULT_TYPES = {"DENY": "駁回", "REVOKE": "撤銷", "NOT_ACCEPTED": "不受理"}
+
+# 單一 OR group 搜尋的硬上限（翻頁累積到此即停）。runner 用它偵測「結果被截斷」→
+# 推 truncated 旗標 + warning，避免律師誤以為已涵蓋全部（無聲偽陰性）。
+APPEAL_SEARCH_CAP = 500
 _UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -88,28 +92,53 @@ def _result_is_bounced(html: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def parse_result_rows(html: str) -> list[dict]:
-    """解析搜尋結果頁 → 命中清單。每筆對齊 task_judgments 骨架。"""
+    """解析搜尋結果頁 → 命中清單。每筆對齊 task_judgments 骨架。
+
+    健壯化（防站台改欄序時整頁靜默丟失）：
+    - 連結/caseId 欄用「含 caseId 的 <a>」在任一 td 動態定位，不依賴寫死 index。
+    - 其餘欄（案號/發文日期/決定文號/主文）優先用表頭 th 文字對應；無表頭才退回寫死序位 _COL_*。
+    """
     soup = BeautifulSoup(html, "html.parser")
+    # 表頭 th 文字 → 欄 index（站台調整欄序時用；th[i] 與 td[i] 對齊）
+    hdr: dict[str, int] = {}
+    for tr in soup.select("table tr"):
+        ths = tr.find_all("th")
+        if ths:
+            for i, th in enumerate(ths):
+                t = th.get_text(strip=True)
+                for key in ("案號", "日期", "文號", "主文"):
+                    if key in t and key not in hdr:
+                        hdr[key] = i
+            break  # 只取第一個含 th 的列當表頭
+
+    def _col(tds, key, fallback_idx):
+        idx = hdr.get(key, fallback_idx)
+        return tds[idx].get_text(strip=True) if 0 <= idx < len(tds) else ""
+
     rows: list[dict] = []
     for tr in soup.select("table tr"):
         tds = tr.find_all("td")
-        if len(tds) <= _COL_LINK:
+        if not tds:
             continue
-        a = tds[_COL_LINK].find("a", href=True)
-        if not a:
+        # 動態找含 caseId 連結的欄（不依賴寫死 _COL_LINK）
+        case_id_internal = ""
+        for td in tds:
+            a = td.find("a", href=True)
+            if a:
+                m = re.search(r"caseId=(\d+)", a["href"])
+                if m:
+                    case_id_internal = m.group(1)
+                    break
+        if not case_id_internal:
             continue
-        m = re.search(r"caseId=(\d+)", a["href"])
-        if not m:
-            continue
-        case_id_internal = m.group(1)
-        case_no = tds[_COL_CASE_NO].get_text(strip=True)       # 11500586041W05
-        wen_hao = tds[_COL_WEN_HAO].get_text(strip=True)       # 勞動法訴一字第1150007704號
+        case_no = _col(tds, "案號", _COL_CASE_NO)               # 11500586041W05
+        wen_hao = _col(tds, "文號", _COL_WEN_HAO)               # 勞動法訴一字第1150007704號
         rows.append({
             "case_id": wen_hao or case_no,                     # 字號為主鍵（律師引用用）
             "case_no": case_no,
             "court": _COURT,
-            "date": _roc_to_iso(tds[_COL_DATE].get_text(strip=True)),
-            "main_text": tds[_COL_MAIN].get_text(strip=True),  # 訴願駁回 / 不受理 / 撤銷…
+            "date": _roc_to_iso(_col(tds, "日期", _COL_DATE)),
+            "main_text": _col(tds, "主文", _COL_MAIN),          # 訴願駁回 / 不受理 / 撤銷…
             "source_url": f"{_DETAIL_URL}?caseId={case_id_internal}",
             "case_id_internal": case_id_internal,
         })
@@ -181,9 +210,10 @@ def parse_detail(html: str, source_url: str = "") -> dict | None:
     # 訴願書常把事實併進理由，故 facts 放這段導言、實質分析在 reasoning。
     facts = _lead_paragraph(lines)
 
-    # 版面非標準（無獨立「主文」「理由」行、或導言措辭不同）→ 結構欄全空但 full_text 有料。
-    # 退而求其次把 full 當 reasoning，避免 run_analysis_v2 收到「（無內容）」而靜默評 0（漏判）。
-    if not main_text and not reasoning and full:
+    # 理由解析失敗（標題非標準如「事實及理由」「核其理由」、或整段版面異常）→ 退回 full_text
+    # 當 reasoning，避免 run_analysis_v2 收到空理由而靜默評 0（漏判）。只要 reasoning 空就退，
+    # 不再要求 main_text 也空 —— 主文有解析出來但理由沒有，是常見的部分失敗，仍須補 reasoning。
+    if not reasoning and full:
         reasoning = full
 
     return {
@@ -220,9 +250,12 @@ def _lead_paragraph(lines: list[str]) -> str:
 
 
 def _extract_doc_date(full: str) -> str:
-    m = re.search(r"中華民國\s*(\d{2,3})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", full)
-    if not m:
+    # 取「最後一個」中華民國日期：落款的訴願決定日在文末，前面出現的多是引用他機關
+    # 處分日 / 法院裁判日（如「不服…中華民國115年1月7日…處分」），取第一個會抓到引用日。
+    ms = list(re.finditer(r"中華民國\s*(\d{2,3})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日", full))
+    if not ms:
         return ""
+    m = ms[-1]
     y = int(m.group(1)) + 1911
     return f"{y:04d}-{int(m.group(2)):02d}-{int(m.group(3)):02d}"
 
@@ -259,14 +292,18 @@ async def solve_captcha_via_claude(client, image_bytes: bytes, *, model: str) ->
 # ---------------------------------------------------------------------------
 
 def _build_search_params(keywords: list[str], case_year: str | None,
-                         result_type: str | None, token: str, valid_code: str) -> dict:
+                         result_type: str | None, token: str, valid_code: str,
+                         law_name: str | None = None) -> dict:
     kws = [k for k in (keywords or []) if k][:3]
+    # operator 必須用站台代碼 "0"(且含/AND) / "1"(或含/OR)，不可送 "and" 字串 —— 實測
+    # 送無效值會讓 appealweb 後端忽略 lawName + rulingBookResultType 篩選、回傳未篩選的
+    # 全部關鍵字命中（420 vs 官方 12）。群內多關鍵字一律 AND（OR 由上層拆 group 各搜），故用 "0"。
     params = {
-        "outgoingWordNum": "", "lawName": "", "caseSerialNumber": "",
+        "outgoingWordNum": "", "lawName": law_name or "", "caseSerialNumber": "",
         "contentPublic1": kws[0] if len(kws) > 0 else "",
-        "operator1": "and",
+        "operator1": "0",
         "contentPublic2": kws[1] if len(kws) > 1 else "",
-        "operator2": "and",
+        "operator2": "0",
         "contentPublic3": kws[2] if len(kws) > 2 else "",
         "caseYear": case_year or "",
         "molCaseDisposalWordNum": "", "molCaseReviewResultsWordNum": "",
@@ -276,14 +313,53 @@ def _build_search_params(keywords: list[str], case_year: str | None,
     return params
 
 
+# 案件類別（lawName）選項由站台 AJAX `/Appeal/AjaxGetLawList` 動態提供（28 項、偶有增修），
+# 故 app 端不寫死、改 proxy 即時取得，UI select 與原站「完全比照」且自動同步。
+_LAW_LIST_URL = f"{_BASE}/Appeal/AjaxGetLawList"
+
+
+async def get_appeal_categories(client: httpx.AsyncClient | None = None) -> list[str]:
+    """回傳訴願「案件類別」清單（lawName 字串、依站台 sort 排序）。
+
+    對應搜尋表單的 `<select name=lawName>`（label「案件類別」），選項 value = lawName 字串
+    （站台 JS：`<option value=data[i].lawName>`），故搜尋時把選定字串直接當 lawName 送出。
+    """
+    own = client is None
+    if own:
+        client = httpx.AsyncClient(headers={"User-Agent": _UA}, follow_redirects=True,
+                                   timeout=30.0)
+    try:
+        r = await client.get(_LAW_LIST_URL, headers={"X-Requested-With": "XMLHttpRequest"})
+        if r.status_code != 200:
+            return []
+        data = r.json()
+        items = [d for d in data if isinstance(d, dict) and d.get("lawName")]
+        items.sort(key=lambda d: d.get("sort", 9999))
+        # 去重保序（站台理論上不重，但防呆）
+        seen, out = set(), []
+        for d in items:
+            name = str(d["lawName"]).strip()
+            if name and name not in seen:
+                seen.add(name)
+                out.append(name)
+        return out
+    except Exception as exc:
+        logger.warning("取訴願案件類別清單失敗：%s", exc)
+        return []
+    finally:
+        if own:
+            await client.aclose()
+
+
 async def search_appeals(
     keywords: list[str],
     *,
     solve_captcha,                 # async callable(image_bytes) -> str（5 碼）
     case_year: str | None = None,
     result_type: str | None = None,
+    law_name: str | None = None,   # 案件類別（lawName 字串），None=全部
     max_captcha_retries: int = 4,
-    max_results: int = 500,
+    max_results: int = APPEAL_SEARCH_CAP,
     max_pages: int = 80,
     page_delay: float = 0.8,       # 翻頁間禮貌延遲（秒）
     client: httpx.AsyncClient | None = None,
@@ -310,15 +386,18 @@ async def search_appeals(
             try:
                 img = (await client.get(_CAPTCHA_URL)).content
                 code = await solve_captcha(img)
+                if len(code) != 5:
+                    logger.info("appeal captcha 非 5 碼（%r）換一張重試", code)
+                    continue
+                params = _build_search_params(keywords, case_year, result_type, token, code,
+                                              law_name=law_name)
+                # 搜尋請求也納入 try：連線逾時 / 503 / WAF 擋時換驗證碼重試，
+                # 不可讓 transient 失敗直接穿出、害整個 OR group 中止。
+                r = await client.get(_RESULT_URL, params=params)
             except Exception as exc:
-                logger.info("appeal 取/解驗證碼失敗（attempt %d）：%s，換一張重試",
+                logger.info("appeal 取/解驗證碼或搜尋請求失敗（attempt %d）：%s，重試",
                             attempt + 1, exc)
                 continue
-            if len(code) != 5:
-                logger.info("appeal captcha 非 5 碼（%r）換一張重試", code)
-                continue
-            params = _build_search_params(keywords, case_year, result_type, token, code)
-            r = await client.get(_RESULT_URL, params=params)
             if _result_is_bounced(r.text):
                 logger.info("appeal 搜尋被打回（驗證碼錯 attempt %d）", attempt + 1)
                 continue

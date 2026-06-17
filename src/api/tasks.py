@@ -82,6 +82,11 @@ class CreateTaskRequest(BaseModel):
         description="勞動部訴願決定結果篩選（appeal domain 用）：DENY(駁回)/REVOKE(撤銷)/"
                     "NOT_ACCEPTED(不受理)，None=全部。其他 domain 忽略。",
     )
+    law_name: str | None = Field(
+        default=None,
+        description="勞動部訴願案件類別篩選（appeal domain 用）：lawName 字串（如「勞動基準法」），"
+                    "選項來自 GET /appeal/categories，None=全部。其他 domain 忽略。",
+    )
 
 
 class CreateTaskResponse(BaseModel):
@@ -121,6 +126,7 @@ async def create_task(
             "year_to": body.year_to,
             "original_keyword": body.original_keyword,
             "result_type": body.result_type,
+            "law_name": body.law_name,
             "search_domain": body.search_domain,   # 冗餘存一份給 recovery 用
         },
     )
@@ -136,6 +142,7 @@ async def create_task(
         api_key=x_api_key,
         search_domain=body.search_domain,
         result_type=body.result_type,
+        law_name=body.law_name,
     )
 
     # Stage 1 不走 task_queue — 直接開 asyncio task 並行跑（只打 MCP 拿 metadata）。
@@ -180,6 +187,15 @@ async def create_task(
     asyncio.create_task(_bg_stage1())
 
     return CreateTaskResponse(task_id=task_id, status="pending")
+
+
+@router.get("/appeal/categories")
+async def appeal_categories() -> dict:
+    """勞動部訴願「案件類別」(lawName) 選項 — proxy 站台 AjaxGetLawList，前端 appeal 模式
+    用來 populate select（與原站完全比照、自動同步）。取不到回空清單（UI 退化為僅「全部」）。"""
+    from src.pipeline import appeal_source
+    cats = await appeal_source.get_appeal_categories()
+    return {"categories": cats}
 
 
 @router.get("/tasks")

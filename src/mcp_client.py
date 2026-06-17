@@ -92,10 +92,18 @@ async def close_mcp() -> None:
     """關閉 ClientSession 及 subprocess。"""
     global _session, _exit_stack_close
     if _exit_stack_close:
-        await _exit_stack_close()
-        _session = None
-        _exit_stack_close = None
-        logger.info("MCP 連線已關閉")
+        try:
+            await _exit_stack_close()
+            logger.info("MCP 連線已關閉")
+        except Exception as exc:
+            # init_mcp 在獨立 task 進入 stdio_client/ClientSession 的 anyio cancel scope，
+            # 但 close_mcp 從 lifespan task 退出 → anyio 可能拋「cross-task cancel scope」
+            # RuntimeError。記錄即可、不要讓 shutdown 噴未捕例外；狀態仍須清掉
+            # （subprocess 由 OS 在 server 進程退出時回收）。
+            logger.warning("MCP 關閉時發生例外（已忽略，狀態仍重置）：%s", exc)
+        finally:
+            _session = None
+            _exit_stack_close = None
 
 
 def _get_session() -> ClientSession:

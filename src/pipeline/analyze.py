@@ -963,6 +963,16 @@ async def run_quick_followup(
         followup_question=question,
     )
 
+    # 訴願 domain → 追問回答也要用訴願用語（QUICK_FOLLOWUP_PROMPT 預設判決框架；從
+    # source_analysis → task 取 search_domain，appeal 時前置訴願 note，免改呼叫端）
+    try:
+        _sa = await db.get_analysis(source_analysis_id)
+        _st = await db.get_task(_sa.get("task_id")) if _sa else None
+        if _st and (_st.get("search_domain") == "appeal"):
+            prompt = _SYNTHESIS_APPEAL_NOTE + prompt
+    except Exception:
+        pass
+
     client = _get_client(api_key)
     estimated_tokens = estimate_prompt_tokens(SYSTEM_PROMPT) + estimate_prompt_tokens(prompt)
 
@@ -1135,7 +1145,11 @@ def _validate_synthesis(data: object, relevant_case_ids: list[str] | None = None
     #   - 彙整：探索型問題（律師問「法院如何判斷 X」），全部 neutral，不該歸為「不足」
     #   - 不足：真的相關筆數過少
     consensus = str(data.get("consensus", "") or "")
-    total = support + oppose + (int(data.get("total_relevant", 0)) - support - oppose)
+    # consensus 推導用「真實相關筆數」（len(relevant_case_ids)，= run_synthesis 在 1354 行
+    # 覆寫的最終 total_relevant），不用 Claude 自報的 total_relevant — Claude 偶爾漏填/填 0
+    # 會讓全中性探索型結果（support=oppose=0）被誤判為「不足」而非「彙整」。
+    # caller 未傳 relevant_case_ids 時退回 Claude 自報值（保留舊行為）。
+    total = len(relevant_case_ids) if relevant_case_ids else int(data.get("total_relevant", 0) or 0)
     if not consensus or consensus not in ("一致", "多數", "分歧", "彙整", "不足"):
         if support > 0 and oppose == 0:
             consensus = "一致"
@@ -1493,6 +1507,7 @@ async def run_analysis_v2(
     judgment_queue: asyncio.Queue | None = None,
     expected_total: int | None = None,
     search_domain: str = "judgment",
+    is_rescore: bool = False,
 ) -> dict:
     """Stage 3 v2：每筆判決跑 ANALYSIS_PROMPT_V2，score 定義為論述詳細度。
 
@@ -1545,11 +1560,22 @@ async def run_analysis_v2(
             logger.info("analysis %s recovery：跳過 %d 筆已完成，剩餘 %d 筆",
                          analysis_id, len(already_done_ids), len(judgments))
         already_done_count = len(already_done_ids)
-        total = len(judgments) + already_done_count
-        await db.update_analysis(
-            analysis_id, total=total,
-            completed=already_done_count, status="running",
-        )
+        computed_total = len(judgments) + already_done_count
+        if is_rescore:
+            # Rescore（Phase 3.5 retry / retry-skipped）只處理小子集，不可用子集大小覆寫
+            # 整個 analysis 的 total/completed — 否則 total 會從主跑的 N（或 2N）崩成 15、
+            # 而 completed 仍累積到 257，UI 顯示 257/15、remaining 變負數（生產 DB 實證）。
+            # 保留主跑寫好的 total（取 max 防呆），completed 不在此 reset、留給
+            # increment_analysis_progress 從既有值繼續累進。
+            _existing = await db.get_analysis(analysis_id) or {}
+            total = max(int(_existing.get("total") or 0), computed_total)
+            await db.update_analysis(analysis_id, total=total, status="running")
+        else:
+            total = computed_total
+            await db.update_analysis(
+                analysis_id, total=total,
+                completed=already_done_count, status="running",
+            )
     else:
         # Streaming 模式：caller 已過濾 already_done、expected_total 只含「剩餘要分析的」
         # 但 UI 進度條 total 需反映「整批判決總數」（含 resume 情境的 already_done）、
@@ -1717,8 +1743,13 @@ async def run_analysis_v2(
                         '再審原告主張', '再審原告略以', '再審被告答辯',
                         # 刑事
                         '自訴人主張', '告訴人',
+                        # 訴願（appeal domain）：訴願人主張段 / 原處分機關答辯段
+                        '訴願人主張', '訴願人訴稱', '訴願人略以', '訴願意旨', '訴願人陳述',
+                        '原處分機關答辯', '原處分機關略以', '原處分機關陳述', '答辯意旨',
                     ]
-                    court_markers = ['本院認為', '本院查', '本院見解', '本院認定', '本院判斷']
+                    court_markers = ['本院認為', '本院查', '本院見解', '本院認定', '本院判斷',
+                                     # 訴願（appeal）：訴願審議委員會 / 本部·本會 的認定段
+                                     '訴願審議委員會', '本部認', '本部查', '本部審酌', '本會認', '經查']
                     last_party  = max((lookback.rfind(m) for m in party_markers), default=-1)
                     last_court  = max((lookback.rfind(m) for m in court_markers), default=-1)
                     if last_party > last_court:
@@ -1877,10 +1908,12 @@ async def run_analysis_v2(
         # streaming：DB completed 是上一輪累積值，理應已 = 2×already_done，但中途 crash 的
         # 半筆（screening +1、fullread 沒跑）或跨輪 pass-mode 改變會讓它漂掉 → 進度條到不了/
         # 超過 100%。在 consumer workers 啟動前硬 reset 吸收 resume 漂移（fresh 時 =0 無副作用）。
-        await db.update_analysis(
-            analysis_id, total=new_total,
-            completed=already_done_count * 2,
-        )
+        # is_rescore：total 已在上方以 max() 保留、completed 由 increment 累進，不在此覆寫。
+        if not is_rescore:
+            await db.update_analysis(
+                analysis_id, total=new_total,
+                completed=already_done_count * 2,
+            )
         logger.info(
             "analysis_v2 %s 自動流轉模式 %d 筆（streaming=%s, screening %dK + auto-promote, total=%d steps）",
             analysis_id, workload_count, streaming_mode, SCREENING_BUDGET // 1000, new_total,
@@ -1890,11 +1923,14 @@ async def run_analysis_v2(
         # → on_batch_done 的 a_now.get("total") 回 None → batch_done 送 total=null →
         # 前端進度顯示「X / null」、且進度條卡在 33%。補寫 total（streaming 也要）。
         # completed 對齊 already_done_count（含 streaming，理由同 two_pass 分支：硬 reset 吸收 resume 漂移）。
-        await db.update_analysis(
-            analysis_id, total=workload_count, completed=already_done_count,
-        )
-        logger.info("analysis_v2 %s 單輪模式 %d 筆（streaming=%s, total=%d）",
-                    analysis_id, workload_count, streaming_mode, workload_count)
+        # is_rescore：不覆寫（total 已保留、completed 由 increment 累進）— 避免把主跑 2N 的
+        # total 崩成本次小子集大小、completed 反超 total。
+        if not is_rescore:
+            await db.update_analysis(
+                analysis_id, total=workload_count, completed=already_done_count,
+            )
+        logger.info("analysis_v2 %s 單輪模式 %d 筆（streaming=%s, total=%d, rescore=%s）",
+                    analysis_id, workload_count, streaming_mode, workload_count, is_rescore)
 
     if streaming_mode:
         # Producer-consumer：CONCURRENCY 個 worker 持續從 queue 取判決，遇 None 結束。

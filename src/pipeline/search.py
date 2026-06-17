@@ -221,7 +221,11 @@ async def _exhaustive_single_keyword(
                     main_text=main_text,
                 )
                 break
-            except mcp_client.MCPSearchError as exc:
+            except (mcp_client.MCPSearchError, ValueError, OSError, RuntimeError) as exc:
+                # 不只 MCPSearchError：truncated/empty payload 會讓 _parse_tool_result 拋
+                # ValueError（json.JSONDecodeError 為其子類）、stdio subprocess 斷線拋 OSError、
+                # session 未連線拋 RuntimeError。這些 transient 失敗也應 retry，否則窮盡分頁
+                # 中途一次壞 payload 就整批 fail、丟棄已抓的 round（律師看到硬失敗而非部分結果）。
                 last_exc = exc
                 backoff = 2 ** attempt  # 1s → 2s → 4s
                 logger.warning(

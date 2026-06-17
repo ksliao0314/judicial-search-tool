@@ -86,6 +86,15 @@ def int_to_chi(n: int) -> str:
         return '〇'
     if n < 0:
         return '-' + int_to_chi(-n)
+    # ≥10000：以「萬」為單位遞迴。units 只到「千」、d = remaining//1000 對 n≥10000 可達 10+，
+    # 原 digits[d] 會 IndexError 讓含 5 位數條號的 keyword 把整個 Stage 1 搞 failed。
+    # 台灣法條條號不會達 5 位數，這是對律師誤貼大數字的容錯（讓 int_to_chi 對任意非負整數全函數）。
+    if n >= 10000:
+        high, low = divmod(n, 10000)
+        if low == 0:
+            return int_to_chi(high) + '萬'
+        low_str = ('〇' if low < 1000 else '') + int_to_chi(low)
+        return int_to_chi(high) + '萬' + low_str
 
     digits = '〇一二三四五六七八九'
     units = [(1000, '千'), (100, '百'), (10, '十')]
@@ -390,6 +399,10 @@ def parse_keyword(kw: str) -> Citation | None:
         return None
     article_num = chi_to_int(article_raw)
     if article_num is None:
+        return None
+    if article_num > 9999:
+        # 無台灣法條條號達 5 位數；超界（律師誤貼大數字）視為非法條引用，回 None 讓呼叫端
+        # fallback 走純關鍵字路徑，而非生成荒謬條號變體
         return None
 
     # 之 N：三種來源（之X、-X、.X 其中 .X 另作項處理 below）

@@ -47,6 +47,12 @@ async def _fetch_one(jid: str, *, source_url: str | None = None) -> dict:
         )
         if d is None:
             raise RuntimeError(f"訴願決定書解析失敗：{source_url}")
+        # 詳情頁的字號偶爾被遮蔽（如法律扶助案顯示「…字第號」缺號碼），但搜尋列的字號
+        # （= jid，由 search_appeals 抓自結果表格）是完整的 → 回填，避免 case_id 空：
+        # 空字號會讓 task_judgments 存空鍵，且多筆遮蔽案都空鍵會撞 UNIQUE(task_id,case_id)
+        # 被 INSERT OR IGNORE 互相吃掉、只活一筆。
+        if not (d.get("case_id") or "").strip() and jid:
+            d["case_id"] = jid
         return d
     from src.pipeline.cons_normalizer import (
         is_interpretation_case_id, normalize_cons_judgment, strip_cons_prefix,

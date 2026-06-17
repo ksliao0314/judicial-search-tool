@@ -166,7 +166,23 @@
           </div>
         </div>
 
-        <!-- 訴願決定結果篩選（只在「勞動部訴願」模式顯示）-->
+        <!-- Search box（設計版 rounded 8px + ⌘K chip）-->
+        <div class="home-search-box mb-3">
+          <label for="main-search" class="sr-only">搜尋關鍵字</label>
+          <input id="main-search" type="text" placeholder="輸入關鍵字" />
+          <span class="home-search-box-chip" title="按 ⌘K 聚焦搜尋">⌘K</span>
+        </div>
+
+        <!-- 訴願案件類別篩選（只在「勞動部訴願」模式顯示）— 選項由 /api/appeal/categories 動態載入，與原站完全比照 -->
+        <div id="appeal-category-row" class="mb-3 hidden">
+          <label for="appeal-category-type" class="block text-[10px] font-mono uppercase tracking-widest text-warm-400 mb-1">案件類別</label>
+          <select id="appeal-category-type"
+                  class="w-full px-3 py-2 text-sm font-serif border border-warm-300 rounded-sm bg-parchment text-ink focus:border-ink focus:outline-none">
+            <option value="">全部</option>
+          </select>
+        </div>
+
+        <!-- 訴願決定結果篩選（只在「勞動部訴願」模式顯示）— 置於關鍵字框正下方 -->
         <div id="appeal-result-row" class="mb-3 hidden">
           <label for="appeal-result-type" class="block text-[10px] font-mono uppercase tracking-widest text-warm-400 mb-1">決定結果</label>
           <select id="appeal-result-type"
@@ -176,13 +192,6 @@
             <option value="REVOKE">撤銷</option>
             <option value="NOT_ACCEPTED">不受理</option>
           </select>
-        </div>
-
-        <!-- Search box（設計版 rounded 8px + ⌘K chip）-->
-        <div class="home-search-box mb-3">
-          <label for="main-search" class="sr-only">搜尋關鍵字</label>
-          <input id="main-search" type="text" placeholder="輸入關鍵字" />
-          <span class="home-search-box-chip" title="按 ⌘K 聚焦搜尋">⌘K</span>
         </div>
 
         <!-- Search CTA -->
@@ -389,8 +398,8 @@
             </div>
             <div id="card-reasoning-status" class="hidden text-[11px] font-mono text-warm-400 mt-1.5"></div>
           </div>
-          <!-- Right: 主文含 filter -->
-          <div class="w-[180px] shrink-0">
+          <!-- Right: 主文含 filter（訴願模式隱藏：主文僅「訴願駁回/原處分撤銷…」固定語、篩無意義）-->
+          <div id="card-main-text-column" class="w-[180px] shrink-0">
             <label for="card-main-text" class="text-[10px] font-mono text-warm-400 uppercase tracking-widest mb-2 block">主文含</label>
             <div class="flex items-center gap-1">
               <input id="card-main-text" type="text" placeholder="例：撤銷原處分"
@@ -403,8 +412,8 @@
 
         <!-- Row 2: 法院層級 (left, flex-1) + 年度 (right, fixed 180px) 同水平 -->
         <div class="px-5 pt-2 pb-3 flex gap-5">
-          <!-- Left: Court tiers -->
-          <div class="flex-1 min-w-0">
+          <!-- Left: Court tiers（訴願模式整欄隱藏：勞動部單一機關、無法院層級）-->
+          <div id="card-tier-column" class="flex-1 min-w-0">
             <div class="text-[10px] font-mono text-warm-400 uppercase tracking-widest mb-2">法院層級</div>
             <div id="card-tier-filters" class="flex flex-wrap gap-x-2 gap-y-1.5"></div>
           </div>
@@ -457,7 +466,7 @@
 
         <!-- Read facts toggle + cost estimate -->
         <div class="px-5 pb-3 flex items-center justify-between">
-          <label class="flex items-center gap-2 cursor-pointer">
+          <label id="card-read-facts-label" class="flex items-center gap-2 cursor-pointer">
             <input type="checkbox" id="card-read-facts" class="cursor-pointer accent-seal" />
             <span class="text-xs font-mono text-warm-500">同時分析事實</span>
           </label>

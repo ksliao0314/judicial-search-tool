@@ -5,7 +5,7 @@
   secondary_analysis_id  選填，副標籤
   min_score              選填，score 門檻（≥）
   court                  選填，法院名稱模糊搜尋
-  year_from / year_to    選填，西元年（資料庫存西元）
+  year_from / year_to    選填，民國年（task_judgments.date 存民國年字串，與 _apply_narrow 一致）
 """
 import asyncio
 import datetime
@@ -169,8 +169,8 @@ async def list_judgments(
     secondary_analysis_id: str | None = Query(None, description="副分析層 ID"),
     min_score: int | None = Query(None, ge=1, le=10, description="最低 score"),
     court: str | None = Query(None, description="法院名稱（模糊）"),
-    year_from: int | None = Query(None, description="起始西元年"),
-    year_to: int | None = Query(None, description="結束西元年"),
+    year_from: int | None = Query(None, description="起始民國年"),
+    year_to: int | None = Query(None, description="結束民國年"),
     limit: int | None = Query(None, ge=1, le=500, description="分頁筆數"),
     offset: int | None = Query(None, ge=0, description="分頁偏移"),
 ):
@@ -426,13 +426,20 @@ async def download_bulk_pdf(task_id: str, body: BulkPdfRequest):
     if not targets:
         raise HTTPException(status_code=404, detail="無符合的判決")
 
+    # 勞動部訴願決定書（appealweb）站台只有 HTML、無原版 PDF → 改打包全文 .md
+    # （全文已在 task_judgments.full_text，律師不必逐筆開原文頁）；其餘走司法院/cons PDF 抓取。
+    def _is_appeal_target(j: dict) -> bool:
+        return "appealweb.mol.gov.tw" in (j.get("source_url") or "")
+    appeal_targets = [j for j in targets if _is_appeal_target(j)]
+    pdf_targets = [j for j in targets if not _is_appeal_target(j)]
+
     sem = asyncio.Semaphore(_PDF_FETCH_CONCURRENCY)
     async with httpx.AsyncClient(
         headers={"User-Agent": _PDF_USER_AGENT},
         follow_redirects=True,
     ) as client:
         results = await asyncio.gather(
-            *(_fetch_one_pdf(client, j, sem) for j in targets)
+            *(_fetch_one_pdf(client, j, sem) for j in pdf_targets)
         )
 
     buf = io.BytesIO()
@@ -446,9 +453,31 @@ async def download_bulk_pdf(task_id: str, body: BulkPdfRequest):
             safe_name = (case_id or "judgment").replace("\u3000", "").replace(" ", "")[:80]
             zf.writestr(f"{safe_name}.pdf", pdf_bytes)
             success += 1
+        # 訴願決定書：站台無 PDF → 打包全文 .md（全文已快取在 task_judgments.full_text）
+        for j in appeal_targets:
+            cid = j.get("case_id") or "訴願決定書"
+            ft = (j.get("full_text") or "").strip()
+            if not ft:
+                failures.append((
+                    cid,
+                    f"訴願決定書全文尚未抓取，請至原文頁 {j.get('source_url') or ''} 查閱",
+                ))
+                continue
+            safe_appeal = cid.replace("　", "").replace(" ", "")[:80]
+            src = j.get("source_url") or ""
+            # full_text 以單一 \n 分行 → markdown 需空行才換段，轉 \n\n 保留決定書段落結構
+            body_md = ft.replace("\n", "\n\n")
+            md = (
+                f"# {cid}\n\n"
+                f"**勞動部訴願決定書**　·　[原文頁]({src})\n\n"
+                f"---\n\n"
+                f"{body_md}\n"
+            )
+            zf.writestr(f"{safe_appeal}.md", md.encode("utf-8"))
+            success += 1
         if failures:
             lines = [
-                f"以下 {len(failures)} 筆判決 PDF 抓取失敗，請至司法院網頁手動下載：",
+                f"以下 {len(failures)} 筆無法打包，請依各筆說明至原文頁手動取得：",
                 "",
             ]
             for cid, reason in failures:

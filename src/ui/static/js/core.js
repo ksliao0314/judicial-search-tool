@@ -21,6 +21,7 @@ function $el(id) {
 var KEY_STORAGE = 'anthropic_api_key';
 var API = {
   tasks:           '/api/tasks',
+  appealCategories:'/api/appeal/categories',
   strategy:        '/api/strategy',
   expandPreview:   '/api/expand-preview',
   shouldPreview:   '/api/should-preview',

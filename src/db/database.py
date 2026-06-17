@@ -223,6 +223,17 @@ async def init_db() -> None:
             )
             logger.info("遷移：analyses 新增 skipped_case_ids 欄位")
 
+        # 遷移 17：analyses.stage3_params — 持久化 Stage 3 啟動參數（JSON）。
+        # 目前存 prefilter_case_ids（理由預篩選定的子集）與 reasoning_filter（即時理由過濾旗標）。
+        # 背景：這兩個參數只活在 Stage3AnalyzeWork dataclass，server 重啟 recovery 或 /retry
+        #   重建 work 時取 dataclass 預設（None / False）→ 改走 narrow 路徑分析「整個 narrow 母體」
+        #   而非律師選定的子集，靜默污染結果集 + 多燒 token。存進 analysis row 讓重建確定性。
+        if "stage3_params" not in a_cols:
+            await db.execute(
+                "ALTER TABLE analyses ADD COLUMN stage3_params TEXT"
+            )
+            logger.info("遷移：analyses 新增 stage3_params 欄位")
+
         # 遷移 16：case_stars 從全域 (case_id PK) 改為 per-analysis (analysis_id, case_id PK)。
         # 每個分析的法律爭點不同、律師標記理由也不同 → 星標綁 analysis_id。
         # 使用者選「清空重來」：偵測到舊 schema（無 analysis_id 欄）→ DROP + 重建（不保留舊全域星標）。
@@ -882,7 +893,9 @@ async def bulk_insert_task_search_hits(task_id: str, hits: list[dict]) -> int:
     `hits` 來自 MCP search_judgments，每筆預期含：
       jid (= case_id) / court / date / url / cause / summary
     使用 INSERT OR IGNORE — 同 task 內 case_id UNIQUE，重複呼叫安全。
-    回傳實際新增筆數。
+    回傳該 task 的「累積總筆數」（SQLite executemany 拿不到 INSERT OR IGNORE 的真實
+    新增列數，故改 query 總數）— 注意不是「本次新增筆數」。目前所有呼叫端都另呼
+    count_task_search_hits 取顯示用總數、不依賴此回傳值。
     """
     if not hits:
         return 0
@@ -923,10 +936,18 @@ async def bulk_insert_task_search_hits(task_id: str, hits: list[dict]) -> int:
 
 
 async def get_task_search_hits(task_id: str) -> list[dict]:
-    """回傳整份 stage 1 結果（依 date 降序）。前端拿到後做 stage 2 client filter。"""
+    """回傳整份 stage 1 結果（依日期降序）。前端拿到後做 stage 2 client filter。
+
+    date 是民國年字串、年份未補零（MCP parser 只 zfill 月/日，如 '99-11-05' vs '115-04-10'）。
+    直接 `ORDER BY date DESC` 是字典序、會把民國99（'9...'）排到115（'1...'）之前當成最新。
+    改先 CAST 年份段為整數排序（`date || '-'` 確保無 '-' 的畸形值也有終止符、退化為 0 排最後）。
+    同 task 內所有 hit 同一來源同格式（judgment=民國 / appeal/interpretation 各自一致），故安全。
+    """
     async with _conn() as db:
         cursor = await db.execute(
-            "SELECT * FROM task_search_hits WHERE task_id = ? ORDER BY date DESC, id",
+            "SELECT * FROM task_search_hits WHERE task_id = ? "
+            "ORDER BY CAST(substr(date, 1, instr(date || '-', '-') - 1) AS INTEGER) DESC, "
+            "date DESC, id",
             (task_id,),
         )
         rows = await cursor.fetchall()
@@ -1091,19 +1112,25 @@ async def create_analysis(
     status: str = "pending",
     filter_fields: str | None = None,
     narrow_state: dict | None = None,
+    stage3_params: dict | None = None,
 ) -> None:
-    """filter_fields / narrow_state 為 stage 3 兩階段流程用；legacy 路徑可省略（NULL）。"""
+    """filter_fields / narrow_state 為 stage 3 兩階段流程用；legacy 路徑可省略（NULL）。
+
+    stage3_params：Stage 3 啟動參數（prefilter_case_ids / reasoning_filter），供 recovery
+    與 /retry 重建 Stage3AnalyzeWork 時還原 — 不存會讓重建走錯母體（見遷移 17）。
+    """
     narrow_json = json.dumps(narrow_state, ensure_ascii=False) if narrow_state else None
+    stage3_json = json.dumps(stage3_params, ensure_ascii=False) if stage3_params else None
     async with _conn() as db:
         await db.execute(
             """
             INSERT INTO analyses
               (id, task_id, question, ai_read_field, filter_fields, narrow_state,
-               status, total, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+               stage3_params, status, total, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (analysis_id, task_id, question, ai_read_field,
-             filter_fields, narrow_json,
+             filter_fields, narrow_json, stage3_json,
              status, total, _now()),
         )
         await db.commit()
@@ -1406,12 +1433,15 @@ async def get_judgments_with_analyses(
         filters.append("tj.court LIKE :court_filter")
         params["court_filter"] = f"%{court_filter}%"
 
+    # 注意：tj.date 是民國年字串（如 '113-12-31'），故 year_from/year_to 比較單位是「民國年」，
+    # 與 runner._apply_narrow 一致（見 judgments.py endpoint 文件）。substr 用 instr 取年份段
+    # （民國年 2-3 位，不可寫死 4），`tj.date || '-'` 防畸形無 '-' 值。
     if year_from is not None:
-        filters.append("CAST(substr(tj.date, 1, 4) AS INTEGER) >= :year_from")
+        filters.append("CAST(substr(tj.date, 1, instr(tj.date || '-', '-') - 1) AS INTEGER) >= :year_from")
         params["year_from"] = year_from
 
     if year_to is not None:
-        filters.append("CAST(substr(tj.date, 1, 4) AS INTEGER) <= :year_to")
+        filters.append("CAST(substr(tj.date, 1, instr(tj.date || '-', '-') - 1) AS INTEGER) <= :year_to")
         params["year_to"] = year_to
 
     where = " AND ".join(filters)
@@ -1436,7 +1466,9 @@ async def get_judgments_with_analyses(
         WHERE {where}
     """
 
-    order_by = "ORDER BY CASE WHEN p.score IS NULL THEN 1 ELSE 0 END, p.score DESC"
+    # tj.case_id 作穩定 tiebreaker：score 是 0-10 整數、同分極多，無唯一次鍵時
+    # SQLite 對 LIMIT/OFFSET 分頁的同分 row 順序未定義 → 跨頁可能重複/漏項。
+    order_by = "ORDER BY CASE WHEN p.score IS NULL THEN 1 ELSE 0 END, p.score DESC, tj.case_id ASC"
 
     select_cols = f"""
             tj.case_id, tj.court, tj.date, tj.source_url,

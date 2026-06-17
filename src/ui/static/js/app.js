@@ -1069,6 +1069,41 @@ function statusColor(s) {
 
 // ─── Search domain toggle (法院判決 ↔ 憲法解釋) ──────────────────────
 // 預設 'judgment'；不記 localStorage、每次新頁面重置到預設
+// 訴願「案件類別」選項：首次進入 appeal 模式時 fetch 一次（proxy 站台 AjaxGetLawList），
+// populate select。失敗則保留僅「全部」（搜尋仍可用、只是不分類別）。
+let _appealCatsLoaded = false;
+let _appealCatsInflight = null;
+async function _ensureAppealCategories() {
+  if (_appealCatsLoaded) return;
+  // in-flight guard：快速連續切到 appeal 模式會重入，無此 guard 兩次 fetch 都通過
+  // _appealCatsLoaded 檢查、各 append 一輪 → 選項重複。共用同一個 promise。
+  if (_appealCatsInflight) return _appealCatsInflight;
+  _appealCatsInflight = (async () => {
+    const sel = document.getElementById('appeal-category-type');
+    if (!sel) return;
+    try {
+      const res = await apiFetch(API.appealCategories);
+      if (!res.ok) return;
+      const data = await res.json();
+      const cats = (data && data.categories) || [];
+      if (!cats.length) return;
+      const frag = document.createDocumentFragment();
+      for (const name of cats) {
+        const o = document.createElement('option');
+        o.value = name; o.textContent = name;
+        frag.appendChild(o);
+      }
+      sel.appendChild(frag);              // 保留第一個「全部」option
+      _appealCatsLoaded = true;
+    } catch (err) {
+      console.warn('[appeal] 載入案件類別失敗:', err);
+    } finally {
+      _appealCatsInflight = null;
+    }
+  })();
+  return _appealCatsInflight;
+}
+
 function applySearchDomain(domain) {
   document.querySelectorAll('.search-domain-btn').forEach(btn => {
     const active = btn.dataset.domain === domain;
@@ -1091,6 +1126,21 @@ function applySearchDomain(domain) {
   // 訴願決定結果選單：只在「勞動部訴願」模式顯示
   const appealRow = document.getElementById('appeal-result-row');
   if (appealRow) appealRow.classList.toggle('hidden', domain !== 'appeal');
+  // 訴願案件類別選單：只在「勞動部訴願」模式顯示，選項首次進入時動態載入
+  const appealCatRow = document.getElementById('appeal-category-row');
+  if (appealCatRow) appealCatRow.classList.toggle('hidden', domain !== 'appeal');
+  if (domain === 'appeal') _ensureAppealCategories();
+  // 訴願模式不需要「進階篩選」（主文含 / 年度對訴願無意義，runKeywordSearch 也不送）→
+  // 隱藏進階入口按鈕並強制收合面板；切回其他模式時還原入口。
+  const advToggle = document.getElementById('btn-home-advanced-toggle');
+  const advPanel = document.getElementById('home-advanced-panel');
+  const advChevron = document.getElementById('home-advanced-chevron');
+  const hideAdvanced = (domain === 'appeal');
+  if (advToggle) advToggle.classList.toggle('hidden', hideAdvanced);
+  if (hideAdvanced && advPanel) {
+    advPanel.classList.add('hidden');
+    if (advChevron) advChevron.style.transform = '';
+  }
 }
 document.querySelectorAll('.search-domain-btn').forEach(btn => {
   btn.addEventListener('click', () => applySearchDomain(btn.dataset.domain));
@@ -1346,6 +1396,10 @@ function runKeywordSearch(keyword, opts = {}) {
   const resultType = domain === 'appeal'
     ? (document.getElementById('appeal-result-type')?.value || null)
     : null;
+  // 訴願案件類別（lawName 字串）只在「勞動部訴願」模式傳
+  const lawName = domain === 'appeal'
+    ? (document.getElementById('appeal-category-type')?.value || null)
+    : null;
   return createAndRunTask({
     keyword,
     search_domain: domain,
@@ -1356,6 +1410,7 @@ function runKeywordSearch(keyword, opts = {}) {
     year_to: yearActive ? _homeYear.to : null,
     original_keyword: opts.originalKeyword || keyword,
     result_type: resultType,
+    law_name: lawName,
   });
 }
 
@@ -3337,6 +3392,15 @@ function renderCardNarrow() {
   reasonBtn.className = reasonBtn.className.replace('bg-seal/10 border-seal text-seal', 'border-warm-200 text-warm-500');
   document.getElementById('card-reasoning-status').classList.add('hidden');
   state.card.reasoningFilter = false;
+  // 訴願模式：訴願非「判決」，「僅比對判決理由」用語與語意不適用 → 隱藏此按鈕
+  const _appealCard = (task?.search_domain === 'appeal');
+  reasonBtn.style.display = _appealCard ? 'none' : '';
+  // 訴願模式再隱藏：「主文含」(主文僅「訴願駁回/原處分撤銷…」固定語、篩無意義)、
+  // 「同時分析事實」(訴願事實段僅導言一句、分不分析差異不大、避免誤導律師)
+  const mainTextCol = document.getElementById('card-main-text-column');
+  if (mainTextCol) mainTextCol.style.display = _appealCard ? 'none' : '';
+  const readFactsLabel = document.getElementById('card-read-facts-label');
+  if (readFactsLabel) readFactsLabel.style.display = _appealCard ? 'none' : '';
   state.card.prefilterCaseIds = null;
   state.card.prefilterRunning = false;
   state.card.prefilterNarrowJson = null;
@@ -3483,6 +3547,14 @@ function renderCardTierChips() {
   const el = document.getElementById('card-tier-filters');
   const task = state.tasks.find(t => t.id === state.card.taskId);
   const isInterp = task?.search_domain === 'interpretation';
+
+  // 訴願模式：勞動部單一機關、無「法院層級」概念 → 整欄隱藏（含標題），不參與篩選
+  const tierCol = document.getElementById('card-tier-column');
+  if (task?.search_domain === 'appeal') {
+    if (tierCol) tierCol.style.display = 'none';
+    return;
+  }
+  if (tierCol) tierCol.style.display = '';
 
   // 憲法解釋模式：tier 沒區分意義，顯示 disabled 標籤保留視覺一致性
   if (isInterp) {
