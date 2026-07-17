@@ -86,6 +86,12 @@ class JudicialWAFBypass:
         async with self._lock:
             # 若另一個 task 剛剛做完（不論成功或 cookies 空），都先讓它沈澱 5 秒；
             # 不檢查 self._cookies，否則 warmup 回空時 N 個並發會各拉一次 Chromium。
+            #
+            # 註（2026-07-17）：此處的去重實際上只在「warmup 曾成功過」時才生效，因為
+            # _last_warmup_at 只在成功路徑更新。曾考慮改用「嘗試時間」+ 指數退避來壓制
+            # 失敗時的重試風暴，但歷史 log 顯示這種暴力重試正是復原手段之一
+            # （84~268 次嘗試才換到 1 次成功），貿然退避可能讓復原從數分鐘變成數小時。
+            # 在真正掌握 warmup 失敗原因（見下方 _run_warmup 的失敗記錄）之前，維持原行為。
             now = time.time()
             if now - self._last_warmup_at < 5.0:
                 logger.debug("WAF bypass: skipping duplicate warmup (fresh < 5s)")
@@ -145,7 +151,18 @@ class JudicialWAFBypass:
         except PlaywrightTimeoutError as e:
             # 將 Playwright 專屬例外收斂成 stdlib asyncio.TimeoutError，
             # 讓上游 search handler 不必依賴 Playwright 型別。
+            logger.warning("WAF bypass: warmup 逾時（%.1fs）：%s", time.time() - t0, e)
             raise asyncio.TimeoutError("WAF warmup 逾時") from e
+        except Exception as e:
+            # 2026-07-17：先前這裡完全沒有記錄 —— warmup 失敗時例外靜默往上拋、被上游
+            # handler 吞掉，log 只看得到「running Playwright warmup...」之後就沒下文
+            # （實測某次事故 93 次嘗試、0 行失敗原因）→ 事後完全無法診斷「為什麼失敗」。
+            # 這裡「只記錄、不改行為」：原樣 re-raise，讓上游邏輯與先前完全一致。
+            logger.warning(
+                "WAF bypass: warmup 失敗（%.1fs）%s: %s",
+                time.time() - t0, type(e).__name__, e, exc_info=True,
+            )
+            raise
 
     @staticmethod
     def is_blocked(response_text: str) -> bool:
