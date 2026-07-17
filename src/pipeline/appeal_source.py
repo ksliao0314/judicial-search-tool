@@ -20,6 +20,8 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 
+from src.utils.rate_limiter import appeal_bucket
+
 logger = logging.getLogger(__name__)
 
 _BASE = "https://appealweb.mol.gov.tw"
@@ -329,6 +331,7 @@ async def get_appeal_categories(client: httpx.AsyncClient | None = None) -> list
         client = httpx.AsyncClient(headers={"User-Agent": _UA}, follow_redirects=True,
                                    timeout=30.0)
     try:
+        await appeal_bucket.acquire(1)
         r = await client.get(_LAW_LIST_URL, headers={"X-Requested-With": "XMLHttpRequest"})
         if r.status_code != 200:
             return []
@@ -374,6 +377,7 @@ async def search_appeals(
         client = httpx.AsyncClient(headers={"User-Agent": _UA}, follow_redirects=True,
                                    timeout=45.0)
     try:
+        await appeal_bucket.acquire(1)
         main = await client.get(_SEARCH_PAGE)
         token = _extract_token(main.text)
         if not token:
@@ -384,6 +388,7 @@ async def search_appeals(
         base_params: dict | None = None
         for attempt in range(max_captcha_retries):
             try:
+                await appeal_bucket.acquire(1)
                 img = (await client.get(_CAPTCHA_URL)).content
                 code = await solve_captcha(img)
                 if len(code) != 5:
@@ -393,6 +398,7 @@ async def search_appeals(
                                               law_name=law_name)
                 # 搜尋請求也納入 try：連線逾時 / 503 / WAF 擋時換驗證碼重試，
                 # 不可讓 transient 失敗直接穿出、害整個 OR group 中止。
+                await appeal_bucket.acquire(1)
                 r = await client.get(_RESULT_URL, params=params)
             except Exception as exc:
                 logger.info("appeal 取/解驗證碼或搜尋請求失敗（attempt %d）：%s，重試",
@@ -419,6 +425,7 @@ async def search_appeals(
             pg["token"] = next_token
             pg["pageNumber"] = str(page)
             pg["pageSize"] = "10"
+            await appeal_bucket.acquire(1)
             r = await client.get(_RESULT_URL, params=pg)
             if _result_is_bounced(r.text):
                 break
@@ -452,6 +459,9 @@ async def get_appeal_decision(source_url_or_case_id: str, *,
         client = httpx.AsyncClient(headers={"User-Agent": _UA}, follow_redirects=True,
                                    timeout=45.0)
     try:
+        # 全域限速：Stage 2.5 以 5 路併發抓詳情，無限速時數百筆分析可衝上數百 req/min
+        # （＝把事務所 IP 打到被司法院封鎖的同一個 bug 型態，只是換站台）
+        await appeal_bucket.acquire(1)
         r = await client.get(url)
         if r.status_code != 200:
             return None

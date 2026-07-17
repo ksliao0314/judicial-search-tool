@@ -21,6 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel
 
 from src.db import database as db
+from src.utils.rate_limiter import judicial_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -102,6 +103,8 @@ async def _cons_pdf_url(
     if "cons.judicial.gov.tw" not in source_url:
         return None
     try:
+        # cons docdata 頁也是打司法院 → 走同一個共用預算（先前漏掉，屬未限速路徑）
+        await _pdf_fetch_bucket.acquire(1)
         resp = await client.get(source_url, timeout=_PDF_FETCH_TIMEOUT)
         if resp.status_code != 200:
             logger.debug("cons docdata %d for %s", resp.status_code, source_url)
@@ -291,10 +294,12 @@ async def resolve_pdf_url(
 
         async with httpx.AsyncClient(
             headers={"User-Agent": _PDF_USER_AGENT},
+            cookies=_judicial_waf_cookies(),   # 同 bulk-pdf：裸請求易被 F5 判爬蟲擋
             follow_redirects=True,
         ) as client:
             for label, cand in candidates:
                 try:
+                    await _pdf_fetch_bucket.acquire(1)   # 同批限速，勿繞過
                     resp = await client.head(cand, timeout=15.0)
                     ct = resp.headers.get("content-type", "").lower()
                     if resp.status_code == 200 and "pdf" in ct:
@@ -313,6 +318,7 @@ async def resolve_pdf_url(
     if "cons.judicial.gov.tw" in source_url:
         async with httpx.AsyncClient(
             headers={"User-Agent": _PDF_USER_AGENT},
+            cookies=_judicial_waf_cookies(),
             follow_redirects=True,
         ) as client:
             url = await _cons_pdf_url(client, source_url, case_id=case_id)
@@ -335,6 +341,12 @@ class BulkPdfRequest(BaseModel):
 # 每個 request 45s timeout + 3 次指數退避重試（1s / 3s / 9s）
 # 實測司法院對 /FILES/*.pdf 有 ReadError-style 斷線；retry 幾乎都能救回
 _PDF_FETCH_CONCURRENCY = 2
+
+# PDF 直抓 / cons docdata 一律走「全 app 對司法院共用預算」judicial_bucket（60/min）。
+# 背景（2026-07-16 實地事故）：這條路徑原本只有 Semaphore(2) 限『並發』卻沒限『速率』，
+# 41 筆批次疊上重試風暴衝到 120~360 req/min，把事務所對外 IP 整個打到被 F5 網路層封鎖。
+# 共用同一個桶（而非另開一個）是關鍵：F5 看的是來源 IP 的『總』速率，各路徑各開桶會疊加。
+_pdf_fetch_bucket = judicial_bucket
 _PDF_FETCH_TIMEOUT = 45.0
 _PDF_FETCH_RETRIES = 3
 _PDF_USER_AGENT = (
@@ -342,9 +354,36 @@ _PDF_USER_AGENT = (
     "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 )
 
+# 司法院 F5 WAF cookies：MCP 的 waf_bypass 用 Playwright 跑 JS 挑戰拿到 TSPD cookies 後
+# 存進這個檔。bulk-pdf / pdf-url 走自己的 httpx client、不經 MCP —— 若不帶這些 cookie，
+# 對 /FILES/*.pdf 的請求在 F5 眼中就是「無 session 的裸請求」，容易被判爬蟲直接 TCP RST；
+# 大批次時還會把整個 IP 短暫封鎖（實測 41 筆批次觸發過，連 MCP 搜尋一起被擋）。
+_WAF_COOKIE_FILE = (
+    _Path(__file__).resolve().parents[2]
+    / "mcp-taiwan-legal-db" / "mcp_server" / "data" / ".judicial_cookies.json"
+)
+
+
+def _judicial_waf_cookies() -> dict:
+    """讀 MCP 已 warmup 的司法院 F5 WAF cookies；讀不到回 {}（退化為原本的裸請求）。"""
+    try:
+        if _WAF_COOKIE_FILE.exists():
+            import json as _json
+            return _json.loads(_WAF_COOKIE_FILE.read_text(encoding="utf-8")).get("cookies") or {}
+    except Exception as exc:
+        logger.debug("讀取司法院 WAF cookies 失敗（改用裸請求）：%s", exc)
+    return {}
+
+
+# WAF 網路層封鎖偵測：TLS 握手成功但一送 HTTP 就被 RST（RemoteProtocolError /
+# ConnectError / ReadError）＝ F5 在擋，不是單筆 transient。連續這樣就熔斷整批，
+# 否則 N 筆 × 2 候選 × 3 重試會狂打數百個請求、加重封鎖又讓律師空等數分鐘。
+_WAF_BLOCK_STREAK = 3
+
 
 async def _fetch_one_pdf(
-    client: httpx.AsyncClient, judgment: dict, sem: asyncio.Semaphore
+    client: httpx.AsyncClient, judgment: dict, sem: asyncio.Semaphore,
+    block_state: dict | None = None,
 ) -> tuple[str, bytes | None, str | None]:
     """抓一筆司法院原版 PDF。return (case_id, pdf_bytes | None, error | None)
 
@@ -354,9 +393,19 @@ async def _fetch_one_pdf(
 
     WAF 對 /FILES/*.pdf 偶有 TCP 層斷線（httpx → httpcore.ReadError）；
     固定退避重試 3 次覆蓋絕大多數 transient 失敗。4xx/5xx 直接回不重試。
+
+    block_state：跨整批共用的 WAF 熔斷狀態 {"blocked": bool, "streak": int}。連續
+    _WAF_BLOCK_STREAK 筆都在網路層被 RST → 判定 F5 正在擋這個 IP，之後每筆立即返回、
+    不再送任何請求（避免數百個請求加重封鎖，也不讓律師空等）。
     """
     case_id = judgment.get("case_id") or ""
     source_url = judgment.get("source_url") or ""
+
+    if block_state and block_state.get("blocked"):
+        return case_id, None, (
+            "司法院 WAF 正在封鎖本機 IP（連線被重設），此筆已略過；"
+            "請稍後再試（通常數十分鐘後自動解除）"
+        )
 
     # Resolve PDF URL candidates：一般判決有兩條可試、cons 只有一條
     candidates: list[str] = []
@@ -374,10 +423,20 @@ async def _fetch_one_pdf(
         return case_id, None, f"司法院未提供此判決 PDF（請至原文頁 {source_url} 手動轉存）"
 
     last_err = None
+    net_level_fail = False   # 只有網路層（RST/斷線/timeout）才算 WAF 封鎖訊號；404/非PDF 不算
     async with sem:
         for candidate_url in candidates:
             for attempt in range(_PDF_FETCH_RETRIES):
+                # 送請求前再檢查一次：同批其他筆可能剛觸發熔斷
+                if block_state and block_state.get("blocked"):
+                    return case_id, None, (
+                        "司法院 WAF 正在封鎖本機 IP（連線被重設），此筆已略過；"
+                        "請稍後再試（通常數十分鐘後自動解除）"
+                    )
                 try:
+                    # 全域限速：每個實際送出的請求都要先拿 token（含重試），
+                    # 這是避免再把事務所 IP 打到被 F5 封鎖的關鍵閘門
+                    await _pdf_fetch_bucket.acquire(1)
                     resp = await client.get(candidate_url, timeout=_PDF_FETCH_TIMEOUT)
                     if resp.status_code == 404:
                         last_err = "HTTP 404"
@@ -392,12 +451,25 @@ async def _fetch_one_pdf(
                             # 非 PDF（通常是 HTML 錯誤頁）→ 換下一個 candidate
                             last_err = f"非 PDF content-type: {ct}"
                             break
+                        if block_state is not None:
+                            block_state["streak"] = 0   # 抓成功 → 連續失敗歸零
                         return case_id, resp.content, None
                 except (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError) as e:
                     last_err = f"{type(e).__name__}: {e}"
+                    net_level_fail = True
                     logger.debug("PDF fetch attempt %d failed: %s", attempt + 1, last_err)
                 if attempt < _PDF_FETCH_RETRIES - 1:
                     await asyncio.sleep(3 ** attempt)
+
+    # 本筆全掛且屬網路層 → 累計連續失敗，達門檻即熔斷整批剩餘下載
+    if net_level_fail and block_state is not None:
+        block_state["streak"] = block_state.get("streak", 0) + 1
+        if block_state["streak"] >= _WAF_BLOCK_STREAK and not block_state.get("blocked"):
+            block_state["blocked"] = True
+            logger.warning(
+                "司法院 PDF 連續 %d 筆在網路層被拒（%s）→ 判定 F5 WAF 封鎖本機 IP，"
+                "熔斷本批剩餘下載（避免加重封鎖）", block_state["streak"], last_err,
+            )
 
     return case_id, None, (
         f"司法院所有下載管道皆失效（{last_err}）、"
@@ -434,12 +506,19 @@ async def download_bulk_pdf(task_id: str, body: BulkPdfRequest):
     pdf_targets = [j for j in targets if not _is_appeal_target(j)]
 
     sem = asyncio.Semaphore(_PDF_FETCH_CONCURRENCY)
+    # 帶上 MCP warmup 好的 F5 WAF cookies：裸請求打 /FILES/*.pdf 會被判爬蟲 TCP RST，
+    # 大批次還會連累整個 IP 被封（連 MCP 搜尋一起擋）。讀不到 cookie 則退化為原行為。
+    waf_cookies = _judicial_waf_cookies()
+    if not waf_cookies:
+        logger.warning("bulk-pdf: 取不到司法院 WAF cookies，改用裸請求（較易被 WAF 擋）")
+    block_state: dict = {"blocked": False, "streak": 0}
     async with httpx.AsyncClient(
         headers={"User-Agent": _PDF_USER_AGENT},
+        cookies=waf_cookies,
         follow_redirects=True,
     ) as client:
         results = await asyncio.gather(
-            *(_fetch_one_pdf(client, j, sem) for j in pdf_targets)
+            *(_fetch_one_pdf(client, j, sem, block_state) for j in pdf_targets)
         )
 
     buf = io.BytesIO()

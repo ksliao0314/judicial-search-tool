@@ -34,7 +34,8 @@ def _zip_names(resp) -> dict:
 def _patch(monkeypatch, pdf_result):
     monkeypatch.setattr(J.db, "get_task_judgments", _fake_get_task_judgments)
 
-    async def _fake_fetch(client, judgment, sem):
+    # 簽名需對齊真實 _fetch_one_pdf（含 WAF 熔斷用的 block_state）
+    async def _fake_fetch(client, judgment, sem, block_state=None):
         cid = judgment["case_id"]
         return (cid, *pdf_result)  # pdf_result = (bytes|None, err|None)
 

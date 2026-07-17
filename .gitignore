@@ -33,6 +33,8 @@ data/*.log
 # MCP fork runtime cache（第一次跑會自動建）
 mcp-taiwan-legal-db/data/cache/
 mcp-taiwan-legal-db/data/.judicial_cookies.json
+# 實際路徑在 mcp_server/data/（舊 pattern 少一層、會漏掉）；內含 F5 WAF session cookies
+mcp-taiwan-legal-db/mcp_server/data/.judicial_cookies.json
 mcp-taiwan-legal-db/mcp_taiwan_legal_db.egg-info/
 
 # Backup files

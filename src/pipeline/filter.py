@@ -12,7 +12,7 @@
 import logging
 
 from src import mcp_client
-from src.utils.rate_limiter import TokenBucket
+from src.utils.rate_limiter import judicial_bucket
 from src.utils.retry import with_retry
 
 logger = logging.getLogger(__name__)
@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 # 的「每批 20 筆、批間 1.5-3.5 秒」節奏（~40 req/min）但更寬鬆。
 # cache hit（app 層 find_cached_judgment / MCP 端 file cache）不走 _fetch_one 就不耗 token。
 # cons get_interpretation 走本機 JSON，也不經此 bucket。
-_mcp_fetch_bucket = TokenBucket(rate_per_minute=60, capacity=30)
+# 2026-07-16 起改為「全 app 對司法院共用的單一預算」的別名（見 rate_limiter.judicial_bucket）：
+# PDF 直抓等其他路徑也分食同一個桶，F5 看的是來源 IP 的總速率，各路徑各開桶會疊加超標。
+_mcp_fetch_bucket = judicial_bucket
 
 async def _fetch_one(jid: str, *, source_url: str | None = None) -> dict:
     """取得單筆判決 / 訴願決定書全文，帶重試。
